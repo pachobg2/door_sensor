@@ -51,6 +51,19 @@ const gpio_num_t BATT_PIN   = GPIO_NUM_1;   // ADC-capable
 // Battery divider ratio: if using two equal resistors, actual = reading * 2.0
 const float BATT_DIVIDER_RATIO = 2.0f;
 
+// Piecewise-linear correction from raw divider-derived voltage to actual
+// voltage, for this specific board's ADC/divider error — same mechanism as
+// temp_humidity_sensor's BATT_CAL. Defaults to identity (no correction):
+// measure this board's own raw vs. actual voltage (multimeter on the
+// battery, compare against the raw value logged over serial) at a few
+// points and replace these before trusting precise battery %.
+struct CalPoint { float raw; float actual; };
+const CalPoint BATT_CAL[] = {
+  {3.00f, 3.00f}, {4.20f, 4.20f},
+};
+const int BATT_CAL_POINTS = sizeof(BATT_CAL) / sizeof(BATT_CAL[0]);
+const float BATTERY_LOW_THRESHOLD_PCT = 15.0f;
+
 // ------------------------------------------------------------------
 // Timing
 // ------------------------------------------------------------------
@@ -63,6 +76,20 @@ const uint32_t MQTT_PUBLISH_ATTEMPTS   = 3;
 const uint32_t DEBOUNCE_SETTLE_MS      = 50;
 const uint32_t OTA_WINDOW_MS           = 5UL * 60 * 1000UL; // how long to stay awake for OTA once triggered
 const uint32_t OTA_SUBSCRIBE_WAIT_MS   = 1000; // time to wait for a retained OTA command after subscribing
+
+// Force-restarts the device if it's ever awake longer than this — a hang,
+// an unexpected infinite loop, a stuck library call. Independent of
+// everything else in the sketch: guarantees the device eventually resets
+// rather than draining the battery all night awake. Re-armed with a longer
+// deadline while an OTA window is actually in progress (see the .ino).
+const uint32_t AWAKE_WATCHDOG_TIMEOUT_MS = 90UL * 1000UL;
+
+// How long Home Assistant keeps showing a sensor's last value before
+// marking it "unavailable" if this device stops reporting. Set to a
+// multiple of the heartbeat interval so a normal gap between wakes never
+// trips it, but a dead battery eventually shows up as unavailable instead
+// of a door state frozen forever at its last value.
+const uint32_t EXPIRE_AFTER_SEC = (uint32_t)(HEARTBEAT_INTERVAL_US / 1000000ULL) * 3;
 
 // DEBUG: set true while bench-testing to (a) give Serial Monitor time to
 // attach before anything happens, and (b) skip deep sleep entirely so the
