@@ -1,0 +1,72 @@
+#pragma once
+
+// Rename this file to config.h and fill in your real values.
+// config.h holds this device's full configuration — credentials, network,
+// identity, and hardware settings. Keep it out of git (see .gitignore).
+
+// ------------------------------------------------------------------
+// WiFi
+// ------------------------------------------------------------------
+const char* WIFI_SSID       = "your-wifi-ssid";
+const char* WIFI_PASSWORD   = "your-wifi-password";
+
+// Optional: pin to a known BSSID / static IP to speed up connect time.
+// Leave BSSID all-zero to disable pinning.
+uint8_t WIFI_BSSID[6]       = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+const bool USE_STATIC_IP    = true;
+IPAddress STATIC_IP(192, 168, 1, 211);
+IPAddress GATEWAY(192, 168, 1, 1);
+IPAddress SUBNET(255, 255, 255, 0);
+IPAddress DNS_SERVER(192, 168, 1, 1);
+
+// ------------------------------------------------------------------
+// MQTT broker
+// ------------------------------------------------------------------
+const char* MQTT_BROKER     = "192.168.1.10";
+const uint16_t MQTT_PORT    = 1883;
+const char* MQTT_USER       = "mqttuser";
+const char* MQTT_PASSWORD   = "mqttpass";
+
+// ------------------------------------------------------------------
+// OTA (ArduinoOTA, triggered remotely via the "OTA Update" MQTT switch —
+// this device has no spare GPIO for a physical OTA button, see the .ino)
+// ------------------------------------------------------------------
+const char* OTA_PASSWORD    = "choose-an-ota-password";
+
+// ------------------------------------------------------------------
+// Device identity
+// ------------------------------------------------------------------
+const char* DEVICE_ID           = "door_sensor_1";
+const char* DEVICE_NAME         = "Door Sensor 1";
+const char* DEVICE_MANUFACTURER = "P@cho";
+const char* DEVICE_MODEL        = "P.Door";
+const char* FIRMWARE_VERSION    = "1.0.0";
+
+// ------------------------------------------------------------------
+// Hardware
+// ------------------------------------------------------------------
+const gpio_num_t REED_PIN   = GPIO_NUM_4;   // RTC-capable, NOT a strapping pin
+const gpio_num_t BATT_PIN   = GPIO_NUM_1;   // ADC-capable
+
+// Battery divider ratio: if using two equal resistors, actual = reading * 2.0
+const float BATT_DIVIDER_RATIO = 2.0f;
+
+// ------------------------------------------------------------------
+// Timing
+// ------------------------------------------------------------------
+const uint64_t HEARTBEAT_INTERVAL_US = 12ULL * 60 * 60 * 1000000ULL; // 12 hours
+const uint32_t WIFI_CONNECT_TIMEOUT_MS = 8000;
+const uint32_t MQTT_CONNECT_TIMEOUT_MS = 5000;   // per attempt
+const uint32_t MQTT_CONNECT_ATTEMPTS   = 3;
+const uint32_t MQTT_PUBLISH_ACK_TIMEOUT_MS = 2000; // per attempt
+const uint32_t MQTT_PUBLISH_ATTEMPTS   = 3;
+const uint32_t DEBOUNCE_SETTLE_MS      = 50;
+const uint32_t OTA_WINDOW_MS           = 5UL * 60 * 1000UL; // how long to stay awake for OTA once triggered
+const uint32_t OTA_SUBSCRIBE_WAIT_MS   = 1000; // time to wait for a retained OTA command after subscribing
+
+// DEBUG: set true while bench-testing to (a) give Serial Monitor time to
+// attach before anything happens, and (b) skip deep sleep entirely so the
+// board stays connected and loop() keeps printing status. Set back to
+// false before deploying on battery, or it'll drain fast.
+const bool DEBUG_MODE = false;
+const uint32_t DEBUG_BOOT_DELAY_MS = 5000;
