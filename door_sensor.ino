@@ -27,6 +27,13 @@
  *     else in the sketch
  *   - HA discovery configs carry an expire_after so a dead device eventually
  *     shows "unavailable" instead of a door state frozen forever
+ *   - Tracks open/close counts for the current local day, reset to 0 in
+ *     firmware the first wake after local midnight (needs an occasional NTP
+ *     sync -- see syncLocalTimeIfDue() -- since this device has no RTC
+ *     backup battery of its own)
+ *   - Boot counter can be reset remotely via a retained MQTT switch (a
+ *     plain "button" entity's press is a one-shot, non-retained message a
+ *     sleeping device would simply miss)
  *
  * Libraries required (Library Manager):
  *   - espMqttClient (Bert Melis)
@@ -39,6 +46,8 @@
 #include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include <time.h>
+#include <sys/time.h>
 
 // ---------------- Config ----------------
 // WiFi/MQTT/OTA credentials, static IP, device identity, hardware pins, and
@@ -60,6 +69,10 @@ String TOPIC_BATTERY_LOW = String("home/") + DEVICE_ID + "/battery_low";
 String TOPIC_BOOT_COUNT  = String("home/") + DEVICE_ID + "/boot_count";
 String TOPIC_FAIL_COUNT  = String("home/") + DEVICE_ID + "/connect_fail_count";
 String TOPIC_TOTAL_FAIL_COUNT = String("home/") + DEVICE_ID + "/total_fail_count";
+String TOPIC_OPEN_COUNT_TODAY  = String("home/") + DEVICE_ID + "/open_count_today";
+String TOPIC_CLOSE_COUNT_TODAY = String("home/") + DEVICE_ID + "/close_count_today";
+String TOPIC_BOOT_RESET_CMD    = String("home/") + DEVICE_ID + "/boot_count_reset/set";
+String TOPIC_BOOT_RESET_STATE  = String("home/") + DEVICE_ID + "/boot_count_reset/state";
 
 // Home Assistant MQTT discovery topics
 String DISCOVERY_DOOR    = String("homeassistant/binary_sensor/") + DEVICE_ID + "/door/config";
@@ -71,6 +84,9 @@ String DISCOVERY_BATTERY_LOW = String("homeassistant/binary_sensor/") + DEVICE_I
 String DISCOVERY_BOOT_COUNT  = String("homeassistant/sensor/") + DEVICE_ID + "/boot_count/config";
 String DISCOVERY_FAIL_COUNT  = String("homeassistant/sensor/") + DEVICE_ID + "/connect_fail_count/config";
 String DISCOVERY_TOTAL_FAIL_COUNT = String("homeassistant/sensor/") + DEVICE_ID + "/total_fail_count/config";
+String DISCOVERY_OPEN_COUNT_TODAY  = String("homeassistant/sensor/") + DEVICE_ID + "/open_count_today/config";
+String DISCOVERY_CLOSE_COUNT_TODAY = String("homeassistant/sensor/") + DEVICE_ID + "/close_count_today/config";
+String DISCOVERY_BOOT_RESET = String("homeassistant/switch/") + DEVICE_ID + "/boot_count_reset/config";
 
 // ---------------- Persisted state (survives deep sleep) ----------------
 
@@ -79,6 +95,10 @@ RTC_DATA_ATTR uint32_t bootCount = 0;
 RTC_DATA_ATTR uint32_t connectFailCount = 0; // increments on any wake that fails to publish, resets on success
 RTC_DATA_ATTR uint32_t totalFailCount = 0;   // lifetime total failed wakes -- never resets, mirrors bootCount
 RTC_DATA_ATTR uint8_t cachedWifiChannel = 0; // 0 = unknown yet, let WiFi.begin() auto-select
+RTC_DATA_ATTR bool g_timeSynced = false;     // true once any cycle has completed a real NTP sync
+RTC_DATA_ATTR int32_t lastCounterDay = -1;   // -1 = unknown yet; YYYYMMDD of the day the counters below are for
+RTC_DATA_ATTR uint32_t openCountToday = 0;
+RTC_DATA_ATTR uint32_t closeCountToday = 0;
 
 // ---------------- Globals ----------------
 
@@ -89,6 +109,7 @@ espMqttClient mqttClient; // uses its own background task on ESP32 -- no manual 
 volatile bool mqttConnectedFlag = false;
 volatile uint16_t lastAckedPacketId = 0;
 volatile bool otaRequested = false;
+volatile bool bootCountResetRequested = false;
 
 // ---------------- Awake watchdog ----------------
 // A hardware timer that force-restarts the device if it's ever awake too
@@ -140,6 +161,8 @@ void goToSleep();
 float batteryPercentage(float v);
 float calibrateBatteryVoltage(float raw);
 String wakeupCauseToString(esp_sleep_wakeup_cause_t cause);
+void updateDailyCounters(bool doorOpen, esp_sleep_wakeup_cause_t wakeupCause);
+void syncLocalTimeIfDue();
 void onMqttConnect(bool sessionPresent);
 void onMqttDisconnect(espMqttClientTypes::DisconnectReason reason);
 void onMqttPublish(uint16_t packetId);
@@ -174,6 +197,11 @@ void setup() {
   Serial.printf("Boot #%lu, wakeup cause: %s (%d), door pin level: %d\n",
                 bootCount, wakeupCauseToString(wakeupCause).c_str(), wakeupCause, pinLevel);
 
+  // Uses whatever the system clock already holds (it survives deep sleep
+  // once synced -- see syncLocalTimeIfDue()) rather than requiring a fresh
+  // network round trip on every wake just to check the date.
+  updateDailyCounters(doorOpen, wakeupCause);
+
   // analogReadMilliVolts() uses the ESP32's factory ADC calibration (eFuse)
   // for an accurate mV reading -- far more accurate than manually mapping
   // raw analogRead() counts against an assumed 3.3V reference, which the
@@ -194,6 +222,16 @@ void setup() {
         sendDiscoveryConfig();
         discoverySent = true;
       }
+
+      if (bootCountResetRequested) {
+        Serial.println("Boot counter reset requested via MQTT switch.");
+        bootCount = 0;
+        // Clear the retained command immediately so we don't re-trigger on
+        // every subsequent wake, and reflect the reset back to the HA UI.
+        publishQos1(TOPIC_BOOT_RESET_CMD, "OFF", true);
+        publishQos1(TOPIC_BOOT_RESET_STATE, "OFF", true);
+      }
+
       int failedTopics = publishState(doorOpen, batteryVoltage, batteryPercent, rssi, connectFailCount);
       if (failedTopics == 0) {
         connectFailCount = 0; // every topic confirmed by the broker, counter clears
@@ -202,6 +240,11 @@ void setup() {
         connectFailCount++;
         totalFailCount++;
       }
+
+      // Resync last (and only periodically) so a slow or failed NTP round
+      // trip can only cost next cycle's date accuracy, never delay or risk
+      // this cycle's actual door-state/battery publish.
+      syncLocalTimeIfDue();
 
       if (otaRequested) {
         Serial.println("OTA requested via MQTT switch -- entering OTA window.");
@@ -353,11 +396,12 @@ void onMqttPublish(uint16_t packetId) {
 
 void onMqttMessage(const espMqttClientTypes::MessageProperties& properties, const char* topic,
                     const uint8_t* payload, size_t len, size_t index, size_t total) {
+  // Payloads aren't null-terminated -- compare the raw bytes directly.
+  bool isOn = (len == 2 && payload[0] == 'O' && payload[1] == 'N');
   if (TOPIC_OTA_CMD.equals(topic)) {
-    // Payloads aren't null-terminated -- compare the raw bytes directly.
-    if (len == 2 && payload[0] == 'O' && payload[1] == 'N') {
-      otaRequested = true;
-    }
+    if (isOn) otaRequested = true;
+  } else if (TOPIC_BOOT_RESET_CMD.equals(topic)) {
+    if (isOn) bootCountResetRequested = true;
   }
 }
 
@@ -391,8 +435,10 @@ bool connectMQTT() {
       publishQos1(TOPIC_AVAILABILITY, "online", true);
 
       // Subscribe and give the broker a moment to deliver any retained OTA
-      // command -- this is how a request made while we were asleep gets seen.
+      // or boot-reset command -- this is how a request made while we were
+      // asleep gets seen.
       mqttClient.subscribe(TOPIC_OTA_CMD.c_str(), 1);
+      mqttClient.subscribe(TOPIC_BOOT_RESET_CMD.c_str(), 1);
       unsigned long subStart = millis();
       while (millis() - subStart < OTA_SUBSCRIBE_WAIT_MS) {
         delay(20);
@@ -516,6 +562,34 @@ void sendDiscoveryConfig() {
     + "}";
   publishQos1(DISCOVERY_RSSI, rssiPayload, true);
 
+  // Daily open/close counters -- reset to 0 in firmware at local midnight
+  // (see updateDailyCounters()), so total_increasing here matches the same
+  // "periodically-resetting counter" convention energy_meter uses for its
+  // day/night tariff accumulators.
+  String openCountPayload = String("{")
+    + "\"name\":\"" + DEVICE_NAME + " Open Count Today\","
+    + "\"unique_id\":\"" + DEVICE_ID + "_open_count_today\","
+    + "\"state_class\":\"total_increasing\","
+    + "\"icon\":\"mdi:door-open\","
+    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"state_topic\":\"" + TOPIC_OPEN_COUNT_TODAY + "\","
+    + "\"availability_topic\":\"" + TOPIC_AVAILABILITY + "\","
+    + "\"device\":{\"identifiers\":[\"" + DEVICE_ID + "\"]}"
+    + "}";
+  publishQos1(DISCOVERY_OPEN_COUNT_TODAY, openCountPayload, true);
+
+  String closeCountPayload = String("{")
+    + "\"name\":\"" + DEVICE_NAME + " Close Count Today\","
+    + "\"unique_id\":\"" + DEVICE_ID + "_close_count_today\","
+    + "\"state_class\":\"total_increasing\","
+    + "\"icon\":\"mdi:door-closed\","
+    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"state_topic\":\"" + TOPIC_CLOSE_COUNT_TODAY + "\","
+    + "\"availability_topic\":\"" + TOPIC_AVAILABILITY + "\","
+    + "\"device\":{\"identifiers\":[\"" + DEVICE_ID + "\"]}"
+    + "}";
+  publishQos1(DISCOVERY_CLOSE_COUNT_TODAY, closeCountPayload, true);
+
   // Boot count sensor discovery payload (diagnostic -- total wakes since last full reset)
   String bootCountPayload = String("{")
     + "\"name\":\"" + DEVICE_NAME + " Boot Count\","
@@ -576,6 +650,28 @@ void sendDiscoveryConfig() {
     + "\"device\":{\"identifiers\":[\"" + DEVICE_ID + "\"]}"
     + "}";
   publishQos1(DISCOVERY_OTA, otaPayload, true);
+
+  // Reset-boot-counter control. Implemented as a retained switch, same
+  // trick as OTA Update above, not a plain MQTT "button" entity -- a
+  // button's press is a one-shot, non-retained message that a sleeping
+  // device would simply miss if it happened to be pressed between wakes.
+  // HA publishes ON with retain, the device consumes it on its next wake
+  // and immediately reports back OFF, which reads as a momentary action
+  // in the UI even though the wire protocol underneath is a switch.
+  String bootResetPayload = String("{")
+    + "\"name\":\"" + DEVICE_NAME + " Reset Boot Counter\","
+    + "\"unique_id\":\"" + DEVICE_ID + "_boot_count_reset\","
+    + "\"command_topic\":\"" + TOPIC_BOOT_RESET_CMD + "\","
+    + "\"state_topic\":\"" + TOPIC_BOOT_RESET_STATE + "\","
+    + "\"payload_on\":\"ON\","
+    + "\"payload_off\":\"OFF\","
+    + "\"retain\":true,"
+    + "\"icon\":\"mdi:restore\","
+    + "\"entity_category\":\"config\","
+    + "\"availability_topic\":\"" + TOPIC_AVAILABILITY + "\","
+    + "\"device\":{\"identifiers\":[\"" + DEVICE_ID + "\"]}"
+    + "}";
+  publishQos1(DISCOVERY_BOOT_RESET, bootResetPayload, true);
 }
 
 // Returns the number of topics that never got a PUBACK this cycle (0 = fully
@@ -606,10 +702,13 @@ int publishState(bool doorOpen, float batteryVoltage, float batteryPercent, int 
   if (!publishQos1(TOPIC_BOOT_COUNT, String(bootCount), true)) failed++;
   if (!publishQos1(TOPIC_FAIL_COUNT, String(failCount), true)) failed++;
   if (!publishQos1(TOPIC_TOTAL_FAIL_COUNT, String(totalFailCount), true)) failed++;
+  if (!publishQos1(TOPIC_OPEN_COUNT_TODAY, String(openCountToday), true)) failed++;
+  if (!publishQos1(TOPIC_CLOSE_COUNT_TODAY, String(closeCountToday), true)) failed++;
 
-  Serial.printf("Published: door=%s, battery=%sV (%s%%, low=%s), rssi=%sdBm, boot=%lu, failCount=%lu (failed topics this cycle: %d)\n",
+  Serial.printf("Published: door=%s, battery=%sV (%s%%, low=%s), rssi=%sdBm, boot=%lu, failCount=%lu, opens_today=%lu, closes_today=%lu (failed topics this cycle: %d)\n",
                 doorOpen ? "OPEN" : "CLOSED", battStr, battPctStr, batteryLow ? "yes" : "no",
-                rssiStr, (unsigned long)bootCount, (unsigned long)failCount, failed);
+                rssiStr, (unsigned long)bootCount, (unsigned long)failCount,
+                (unsigned long)openCountToday, (unsigned long)closeCountToday, failed);
 
   return failed;
 }
@@ -674,6 +773,61 @@ String wakeupCauseToString(esp_sleep_wakeup_cause_t cause) {
     case ESP_SLEEP_WAKEUP_TIMER:     return "heartbeat";
     case ESP_SLEEP_WAKEUP_UNDEFINED: return "power_on_or_reset";
     default:                         return "other";
+  }
+}
+
+// ---------------- Time / daily counters ----------------
+
+// Resets openCountToday/closeCountToday to 0 the first time this runs on a
+// new local calendar day, then (only on an actual door-transition wake, not
+// the periodic heartbeat) tallies this wake's event. Reads whatever the
+// system clock already holds -- no network call here, see syncLocalTimeIfDue()
+// below for why. Until the very first NTP sync ever completes (g_timeSynced
+// still false, i.e. this device's first-ever boot), the day is unknown, so
+// this cycle's event simply isn't tallied -- a one-time, cosmetic gap.
+void updateDailyCounters(bool doorOpen, esp_sleep_wakeup_cause_t wakeupCause) {
+  if (!g_timeSynced) {
+    Serial.println("[counters] clock not yet synced -- skipping daily open/close tally this cycle.");
+    return;
+  }
+
+  time_t now = time(nullptr);
+  struct tm t;
+  localtime_r(&now, &t);
+  int32_t today = (t.tm_year + 1900) * 10000L + (t.tm_mon + 1) * 100L + t.tm_mday;
+
+  if (today != lastCounterDay) {
+    Serial.printf("[counters] new local day (%ld -> %ld), resetting open/close counters.\n",
+                  (long)lastCounterDay, (long)today);
+    openCountToday = 0;
+    closeCountToday = 0;
+    lastCounterDay = today;
+  }
+
+  if (wakeupCause == ESP_SLEEP_WAKEUP_GPIO) {
+    if (doorOpen) openCountToday++; else closeCountToday++;
+  }
+}
+
+// Syncs the system clock to local time (needed only so updateDailyCounters()
+// can tell when local midnight has passed). The system clock survives deep
+// sleep once synced, so this only needs to run occasionally to correct
+// drift, not on every wake -- called after MQTT is up, and deliberately
+// last in the connected branch so a slow/failed NTP round trip can only
+// cost date accuracy, never delay or risk the door-state/battery publish.
+void syncLocalTimeIfDue() {
+  bool dueForResync = !g_timeSynced || (bootCount % NTP_RESYNC_EVERY_N_BOOTS == 0);
+  if (!dueForResync) return;
+
+  configTzTime(TZ_STRING, NTP_SERVER);
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo, NTP_SYNC_TIMEOUT_MS)) {
+    g_timeSynced = true;
+    char buf[32];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    Serial.printf("[NTP] Local time synced: %s\n", buf);
+  } else {
+    Serial.println("[NTP] Sync failed this cycle.");
   }
 }
 

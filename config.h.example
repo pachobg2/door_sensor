@@ -91,6 +91,14 @@ const uint32_t AWAKE_WATCHDOG_TIMEOUT_MS = 90UL * 1000UL;
 // of a door state frozen forever at its last value.
 const uint32_t EXPIRE_AFTER_SEC = (uint32_t)(HEARTBEAT_INTERVAL_US / 1000000ULL) * 3;
 
+// ------------------------------------------------------------------
+// Time (used only to reset the daily open/close counters at local midnight)
+// ------------------------------------------------------------------
+const char* NTP_SERVER = "pool.ntp.org";
+const char* TZ_STRING  = "EET-2EEST,M3.5.0/3,M10.5.0/4"; // Bulgaria, matches energy_meter
+const uint32_t NTP_SYNC_TIMEOUT_MS = 5000;
+const uint32_t NTP_RESYNC_EVERY_N_BOOTS = 6; // small clock drift between resyncs won't shift the day
+
 // DEBUG: set true while bench-testing to (a) give Serial Monitor time to
 // attach before anything happens, and (b) skip deep sleep entirely so the
 // board stays connected and loop() keeps printing status. Set back to
