@@ -740,31 +740,33 @@ float calibrateBatteryVoltage(float raw) {
 // same curve used across the other battery-powered sensors so readings are
 // consistent device to device.
 //
-// Top capped at 4.15V, not the 4.20V charge-termination voltage: a resting,
-// unplugged cell settles below 4.20V (surface-charge relaxation) well
-// before it's actually due for a recharge, so 4.20V as "100%" meant the
-// reading almost never reached 100% in practice.
+// Rescaled from the original 4.20V-100%/3.20V-0% curve: every breakpoint
+// proportionally compressed by 0.95 (= 0.95V new span / 1.00V old span)
+// so the curve's shape (same relative tier widths, same emphasis on the
+// 3.5-3.9V "knee") is preserved but fit to 4.15V-100%/3.20V-0% instead of
+// just flattening the top into an instant jump at 4.15V.
 float batteryPercentage(float v) {
   float pct;
 
   if (v >= 4.15)      pct = 100.0;
-  else if (v >= 4.10) pct = 90.0 + (v - 4.10) / 0.05 * 5.0;
-  else if (v >= 4.05) pct = 85.0 + (v - 4.05) / 0.05 * 5.0;
-  else if (v >= 4.00) pct = 80.0 + (v - 4.00) / 0.05 * 5.0;
-  else if (v >= 3.95) pct = 75.0 + (v - 3.95) / 0.05 * 5.0;
-  else if (v >= 3.90) pct = 70.0 + (v - 3.90) / 0.05 * 5.0;
-  else if (v >= 3.83) pct = 65.0 + (v - 3.83) / 0.07 * 5.0;
-  else if (v >= 3.75) pct = 60.0 + (v - 3.75) / 0.08 * 5.0;
-  else if (v >= 3.71) pct = 55.0 + (v - 3.71) / 0.04 * 5.0;
-  else if (v >= 3.68) pct = 50.0 + (v - 3.68) / 0.03 * 5.0;
-  else if (v >= 3.64) pct = 45.0 + (v - 3.64) / 0.04 * 5.0;
-  else if (v >= 3.60) pct = 40.0 + (v - 3.60) / 0.04 * 5.0;
-  else if (v >= 3.56) pct = 35.0 + (v - 3.56) / 0.06 * 5.0;
-  else if (v >= 3.50) pct = 30.0 + (v - 3.50) / 0.06 * 5.0;
-  else if (v >= 3.45) pct = 25.0 + (v - 3.45) / 0.05 * 5.0;
-  else if (v >= 3.40) pct = 20.0 + (v - 3.40) / 0.05 * 5.0;
-  else if (v >= 3.35) pct = 15.0 + (v - 3.35) / 0.05 * 5.0;
-  else if (v >= 3.30) pct = 10.0 + (v - 3.30) / 0.05 * 5.0;
+  else if (v >= 4.10) pct = 95.0 + (v - 4.10) / 0.05 * 5.0;
+  else if (v >= 4.06) pct = 90.0 + (v - 4.06) / 0.04 * 5.0;
+  else if (v >= 4.01) pct = 85.0 + (v - 4.01) / 0.05 * 5.0;
+  else if (v >= 3.96) pct = 80.0 + (v - 3.96) / 0.05 * 5.0;
+  else if (v >= 3.91) pct = 75.0 + (v - 3.91) / 0.05 * 5.0;
+  else if (v >= 3.87) pct = 70.0 + (v - 3.87) / 0.04 * 5.0;
+  else if (v >= 3.80) pct = 65.0 + (v - 3.80) / 0.07 * 5.0;
+  else if (v >= 3.72) pct = 60.0 + (v - 3.72) / 0.08 * 5.0;
+  else if (v >= 3.68) pct = 55.0 + (v - 3.68) / 0.04 * 5.0;
+  else if (v >= 3.66) pct = 50.0 + (v - 3.66) / 0.02 * 5.0;
+  else if (v >= 3.62) pct = 45.0 + (v - 3.62) / 0.04 * 5.0;
+  else if (v >= 3.58) pct = 40.0 + (v - 3.58) / 0.04 * 5.0;
+  else if (v >= 3.54) pct = 35.0 + (v - 3.54) / 0.04 * 5.0;
+  else if (v >= 3.49) pct = 30.0 + (v - 3.49) / 0.05 * 5.0;
+  else if (v >= 3.44) pct = 25.0 + (v - 3.44) / 0.05 * 5.0;
+  else if (v >= 3.39) pct = 20.0 + (v - 3.39) / 0.05 * 5.0;
+  else if (v >= 3.34) pct = 15.0 + (v - 3.34) / 0.05 * 5.0;
+  else if (v >= 3.30) pct = 10.0 + (v - 3.30) / 0.04 * 5.0;
   else if (v >= 3.25) pct =  5.0 + (v - 3.25) / 0.05 * 5.0;
   else if (v >= 3.20) pct =  0.0 + (v - 3.20) / 0.05 * 5.0;
   else                pct = 0.0;
