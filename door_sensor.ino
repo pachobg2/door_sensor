@@ -739,29 +739,36 @@ float calibrateBatteryVoltage(float raw) {
 // Piecewise-linear state-of-charge curve for a typical single-cell Li-ion,
 // same curve used across the other battery-powered sensors so readings are
 // consistent device to device.
+//
+// Top capped at 4.15V, not the 4.20V charge-termination voltage: a resting,
+// unplugged cell settles below 4.20V (surface-charge relaxation) well
+// before it's actually due for a recharge, so 4.20V as "100%" meant the
+// reading almost never reached 100% in practice.
 float batteryPercentage(float v) {
   float pct;
+
   if (v >= 4.15)      pct = 100.0;
-  else if (v >= 4.10) pct = 95.0 + (v - 4.10) / (4.15 - 4.10) * 5.0;
-  else if (v >= 4.05) pct = 90.0 + (v - 4.05) / (4.10 - 4.05) * 5.0;
-  else if (v >= 4.00) pct = 85.0 + (v - 4.00) / (4.05 - 4.00) * 5.0;
-  else if (v >= 3.95) pct = 80.0 + (v - 3.95) / (4.00 - 3.95) * 5.0;
-  else if (v >= 3.90) pct = 75.0 + (v - 3.90) / (3.95 - 3.90) * 5.0;
-  else if (v >= 3.83) pct = 70.0 + (v - 3.83) / (3.90 - 3.83) * 5.0;
-  else if (v >= 3.75) pct = 65.0 + (v - 3.75) / (3.83 - 3.75) * 5.0;
-  else if (v >= 3.71) pct = 60.0 + (v - 3.71) / (3.75 - 3.71) * 5.0;
-  else if (v >= 3.68) pct = 55.0 + (v - 3.68) / (3.71 - 3.68) * 5.0;
-  else if (v >= 3.64) pct = 50.0 + (v - 3.64) / (3.68 - 3.64) * 5.0;
-  else if (v >= 3.60) pct = 45.0 + (v - 3.60) / (3.64 - 3.60) * 5.0;
-  else if (v >= 3.56) pct = 40.0 + (v - 3.56) / (3.60 - 3.56) * 5.0;
-  else if (v >= 3.50) pct = 35.0 + (v - 3.50) / (3.56 - 3.50) * 5.0;
-  else if (v >= 3.45) pct = 30.0 + (v - 3.45) / (3.50 - 3.45) * 5.0;
-  else if (v >= 3.40) pct = 25.0 + (v - 3.40) / (3.45 - 3.40) * 5.0;
-  else if (v >= 3.35) pct = 20.0 + (v - 3.35) / (3.40 - 3.35) * 5.0;
-  else if (v >= 3.25) pct = 15.0 + (v - 3.25) / (3.35 - 3.25) * 5.0;
-  else if (v >= 3.15) pct = 10.0 + (v - 3.15) / (3.25 - 3.15) * 5.0;
-  else if (v >= 3.10) pct =  5.0 + (v - 3.10) / (3.15 - 3.10) * 5.0;
-  else pct = 0.0;
+  else if (v >= 4.10) pct = 90.0 + (v - 4.10) / 0.05 * 5.0;
+  else if (v >= 4.05) pct = 85.0 + (v - 4.05) / 0.05 * 5.0;
+  else if (v >= 4.00) pct = 80.0 + (v - 4.00) / 0.05 * 5.0;
+  else if (v >= 3.95) pct = 75.0 + (v - 3.95) / 0.05 * 5.0;
+  else if (v >= 3.90) pct = 70.0 + (v - 3.90) / 0.05 * 5.0;
+  else if (v >= 3.83) pct = 65.0 + (v - 3.83) / 0.07 * 5.0;
+  else if (v >= 3.75) pct = 60.0 + (v - 3.75) / 0.08 * 5.0;
+  else if (v >= 3.71) pct = 55.0 + (v - 3.71) / 0.04 * 5.0;
+  else if (v >= 3.68) pct = 50.0 + (v - 3.68) / 0.03 * 5.0;
+  else if (v >= 3.64) pct = 45.0 + (v - 3.64) / 0.04 * 5.0;
+  else if (v >= 3.60) pct = 40.0 + (v - 3.60) / 0.04 * 5.0;
+  else if (v >= 3.56) pct = 35.0 + (v - 3.56) / 0.06 * 5.0;
+  else if (v >= 3.50) pct = 30.0 + (v - 3.50) / 0.06 * 5.0;
+  else if (v >= 3.45) pct = 25.0 + (v - 3.45) / 0.05 * 5.0;
+  else if (v >= 3.40) pct = 20.0 + (v - 3.40) / 0.05 * 5.0;
+  else if (v >= 3.35) pct = 15.0 + (v - 3.35) / 0.05 * 5.0;
+  else if (v >= 3.30) pct = 10.0 + (v - 3.30) / 0.05 * 5.0;
+  else if (v >= 3.25) pct =  5.0 + (v - 3.25) / 0.05 * 5.0;
+  else if (v >= 3.20) pct =  0.0 + (v - 3.20) / 0.05 * 5.0;
+  else                pct = 0.0;
+
   return roundf(pct);
 }
 
