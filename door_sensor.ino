@@ -73,6 +73,7 @@ String TOPIC_OPEN_COUNT_TODAY  = String("home/") + DEVICE_ID + "/open_count_toda
 String TOPIC_CLOSE_COUNT_TODAY = String("home/") + DEVICE_ID + "/close_count_today";
 String TOPIC_BOOT_RESET_CMD    = String("home/") + DEVICE_ID + "/boot_count_reset/set";
 String TOPIC_BOOT_RESET_STATE  = String("home/") + DEVICE_ID + "/boot_count_reset/state";
+String TOPIC_OTA_ACTIVE = String("home/") + DEVICE_ID + "/ota_active";
 
 // Home Assistant MQTT discovery topics
 String DISCOVERY_DOOR    = String("homeassistant/binary_sensor/") + DEVICE_ID + "/door/config";
@@ -87,6 +88,7 @@ String DISCOVERY_TOTAL_FAIL_COUNT = String("homeassistant/sensor/") + DEVICE_ID 
 String DISCOVERY_OPEN_COUNT_TODAY  = String("homeassistant/sensor/") + DEVICE_ID + "/open_count_today/config";
 String DISCOVERY_CLOSE_COUNT_TODAY = String("homeassistant/sensor/") + DEVICE_ID + "/close_count_today/config";
 String DISCOVERY_BOOT_RESET = String("homeassistant/switch/") + DEVICE_ID + "/boot_count_reset/config";
+String DISCOVERY_OTA_ACTIVE = String("homeassistant/binary_sensor/") + DEVICE_ID + "/ota_active/config";
 
 // ---------------- Persisted state (survives deep sleep) ----------------
 
@@ -254,11 +256,13 @@ void setup() {
         publishQos1(TOPIC_OTA_STATE, "OFF", true);
 
         startAwakeWatchdog(OTA_WINDOW_MS + 30000); // OTA legitimately needs to stay awake this long
+        publishQos1(TOPIC_OTA_ACTIVE, "ON", true); // visible in HA even though this device has no status LED
         ArduinoOTA.setHostname(DEVICE_ID);
         ArduinoOTA.setPassword(OTA_PASSWORD);
         ArduinoOTA.begin();
         Serial.printf("OTA ready, staying awake for up to %lu ms...\n", OTA_WINDOW_MS);
         runOtaWindow();
+        publishQos1(TOPIC_OTA_ACTIVE, "OFF", true);
         Serial.println("OTA window elapsed, resuming normal cycle.");
       }
     } else {
@@ -672,6 +676,23 @@ void sendDiscoveryConfig() {
     + "\"device\":{\"identifiers\":[\"" + DEVICE_ID + "\"]}"
     + "}";
   publishQos1(DISCOVERY_BOOT_RESET, bootResetPayload, true);
+
+  // OTA-active indicator. This device has no status LED (unlike the other
+  // battery sensors in this fleet) to show OTA is in progress, so this is
+  // the only indication of it -- ON only for the ~OTA_WINDOW_MS the device
+  // stays awake listening for a flash, OFF the rest of the time.
+  String otaActivePayload = String("{")
+    + "\"name\":\"" + DEVICE_NAME + " OTA Active\","
+    + "\"unique_id\":\"" + DEVICE_ID + "_ota_active\","
+    + "\"entity_category\":\"diagnostic\","
+    + "\"icon\":\"mdi:upload\","
+    + "\"payload_on\":\"ON\","
+    + "\"payload_off\":\"OFF\","
+    + "\"state_topic\":\"" + TOPIC_OTA_ACTIVE + "\","
+    + "\"availability_topic\":\"" + TOPIC_AVAILABILITY + "\","
+    + "\"device\":{\"identifiers\":[\"" + DEVICE_ID + "\"]}"
+    + "}";
+  publishQos1(DISCOVERY_OTA_ACTIVE, otaActivePayload, true);
 }
 
 // Returns the number of topics that never got a PUBACK this cycle (0 = fully
@@ -704,6 +725,11 @@ int publishState(bool doorOpen, float batteryVoltage, float batteryPercent, int 
   if (!publishQos1(TOPIC_TOTAL_FAIL_COUNT, String(totalFailCount), true)) failed++;
   if (!publishQos1(TOPIC_OPEN_COUNT_TODAY, String(openCountToday), true)) failed++;
   if (!publishQos1(TOPIC_CLOSE_COUNT_TODAY, String(closeCountToday), true)) failed++;
+
+  // Always OFF here -- this runs before the OTA check below. Also acts as a
+  // safety net: if the device somehow died mid-OTA on a previous wake, the
+  // next normal wake clears a stale retained "ON" automatically.
+  if (!publishQos1(TOPIC_OTA_ACTIVE, "OFF", true)) failed++;
 
   Serial.printf("Published: door=%s, battery=%sV (%s%%, low=%s), rssi=%sdBm, boot=%lu, failCount=%lu, opens_today=%lu, closes_today=%lu (failed topics this cycle: %d)\n",
                 doorOpen ? "OPEN" : "CLOSED", battStr, battPctStr, batteryLow ? "yes" : "no",
