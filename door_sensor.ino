@@ -34,6 +34,11 @@
  *   - Boot counter can be reset remotely via a retained MQTT switch (a
  *     plain "button" entity's press is a one-shot, non-retained message a
  *     sleeping device would simply miss)
+ *   - The reed switch is polled throughout the WiFi/MQTT/publish cycle (not
+ *     just once at wake), so a rapid open-then-close that happens while the
+ *     device is busy on the network still gets caught, counted, and
+ *     reported -- not just whichever state it happened to be in at the
+ *     single moment it was originally read
  *
  * Libraries required (Library Manager):
  *   - espMqttClient (Bert Melis)
@@ -113,6 +118,13 @@ volatile uint16_t lastAckedPacketId = 0;
 volatile bool otaRequested = false;
 volatile bool bootCountResetRequested = false;
 
+// Latest known door state for this wake cycle. Seeded from the initial read
+// in setup(), then kept fresh by checkDoorPin() polling throughout the WiFi
+// connect / MQTT connect / publish wait loops, so a rapid open-then-close
+// (or vice versa) that happens while the device is busy on the network gets
+// caught and reported instead of only the net state by the time it sleeps.
+bool currentDoorOpen = false;
+
 // ---------------- Awake watchdog ----------------
 // A hardware timer that force-restarts the device if it's ever awake too
 // long -- a hang, an unexpected infinite loop, a stuck library call. This
@@ -165,6 +177,7 @@ float calibrateBatteryVoltage(float raw);
 String wakeupCauseToString(esp_sleep_wakeup_cause_t cause);
 void updateDailyCounters(bool doorOpen, esp_sleep_wakeup_cause_t wakeupCause);
 void syncLocalTimeIfDue();
+void checkDoorPin();
 void onMqttConnect(bool sessionPresent);
 void onMqttDisconnect(espMqttClientTypes::DisconnectReason reason);
 void onMqttPublish(uint16_t packetId);
@@ -194,6 +207,8 @@ void setup() {
 
   int pinLevel = digitalRead(REED_PIN);
   bool doorOpen = (pinLevel == HIGH); // circuit broken (no magnet) = open
+  currentDoorOpen = doorOpen; // kept fresh by checkDoorPin() as this cycle progresses
+  bool lastReportedDoorOpen = doorOpen; // what MQTT was last actually told, for the final catch-up check
 
   esp_sleep_wakeup_cause_t wakeupCause = esp_sleep_get_wakeup_cause();
   Serial.printf("Boot #%lu, wakeup cause: %s (%d), door pin level: %d\n",
@@ -234,7 +249,8 @@ void setup() {
         publishQos1(TOPIC_BOOT_RESET_STATE, "OFF", true);
       }
 
-      int failedTopics = publishState(doorOpen, batteryVoltage, batteryPercent, rssi, connectFailCount);
+      int failedTopics = publishState(currentDoorOpen, batteryVoltage, batteryPercent, rssi, connectFailCount);
+      lastReportedDoorOpen = currentDoorOpen; // whatever publishState() just told MQTT
       if (failedTopics == 0) {
         connectFailCount = 0; // every topic confirmed by the broker, counter clears
       } else {
@@ -284,6 +300,20 @@ void setup() {
     return;
   }
 
+  // Final check right before tearing down the connection -- closes the
+  // residual gap between the last poll during publishing and now, plus
+  // catches any transition that checkDoorPin() saw (and counted) during
+  // publishState()'s own publish calls but couldn't publish itself (see
+  // checkDoorPin()'s comment on why). This call site is safe: nothing else
+  // is waiting on a PUBACK right now, so publishing here can't race it.
+  checkDoorPin();
+  if (mqttClient.connected() && currentDoorOpen != lastReportedDoorOpen) {
+    Serial.printf("[door] publishing corrected final state before sleep: %s\n",
+                  currentDoorOpen ? "OPEN" : "CLOSED");
+    publishQos1(TOPIC_STATE, currentDoorOpen ? "OPEN" : "CLOSED", true);
+    lastReportedDoorOpen = currentDoorOpen;
+  }
+
   // Clean (non-forced) disconnect: the library sends any remaining queued
   // messages before closing the connection. Give it a moment to actually
   // complete before tearing down WiFi, or the broker sees an abrupt drop
@@ -293,7 +323,7 @@ void setup() {
   WiFi.disconnect(true);
 
   stopAwakeWatchdog(); // about to sleep on our own terms, no need for the failsafe to fire mid-sleep
-  armWakeup(pinLevel);
+  armWakeup(currentDoorOpen ? HIGH : LOW); // fresh state, not the stale reading from the top of this cycle
   goToSleep();
 }
 
@@ -334,6 +364,7 @@ bool attemptWifiConnect(uint8_t channel, bool useBSSID) {
   wl_status_t lastStatus = WiFi.status();
   while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
     delay(50);
+    checkDoorPin();
     wl_status_t s = WiFi.status();
     if (s != lastStatus) {
       Serial.printf("[debug] WiFi status changed: %d\n", s);
@@ -432,6 +463,7 @@ bool connectMQTT() {
     unsigned long start = millis();
     while (!mqttConnectedFlag && millis() - start < MQTT_CONNECT_TIMEOUT_MS) {
       delay(20);
+      checkDoorPin();
     }
 
     if (mqttConnectedFlag) {
@@ -446,6 +478,7 @@ bool connectMQTT() {
       unsigned long subStart = millis();
       while (millis() - subStart < OTA_SUBSCRIBE_WAIT_MS) {
         delay(20);
+        checkDoorPin();
       }
 
       return true;
@@ -477,6 +510,7 @@ bool publishQos1(const String& topic, const String& payload, bool retain) {
     unsigned long start = millis();
     while (lastAckedPacketId != packetId && millis() - start < MQTT_PUBLISH_ACK_TIMEOUT_MS) {
       delay(10);
+      checkDoorPin();
     }
 
     if (lastAckedPacketId == packetId) {
@@ -844,6 +878,41 @@ void updateDailyCounters(bool doorOpen, esp_sleep_wakeup_cause_t wakeupCause) {
   }
 }
 
+// ---------------- Door pin polling ----------------
+
+// Re-reads the reed switch and, if it's genuinely changed since the last
+// known state (currentDoorOpen), debounces it, updates currentDoorOpen, and
+// tallies it into today's open/close counters. Called from inside the
+// WiFi-connect, MQTT-connect, per-publish PUBACK-wait, and OTA-window loops
+// (all of which already poll in a delay() loop), so a rapid open-then-close
+// that happens while the device is busy on the network -- not just the
+// transition that caused this wake -- gets caught, at no extra awake-time
+// cost since it rides on delays the cycle is already spending.
+//
+// Deliberately does NOT publish anything itself: publishQos1() tracks its
+// one in-flight PUBACK in a single shared variable (see its own comment),
+// assuming only one publish is ever outstanding at a time. This function is
+// called from inside publishQos1()'s own wait loop, so publishing here
+// would nest a second publish inside the first and race that tracking,
+// potentially causing the outer publish to miss its own ack. Instead,
+// callers publish the up-to-date currentDoorOpen themselves at safe,
+// non-nested points -- see publishState()'s caller and the final check
+// right before sleep in setup().
+void checkDoorPin() {
+  int level = digitalRead(REED_PIN);
+  bool open = (level == HIGH);
+  if (open == currentDoorOpen) return;
+
+  delay(DEBOUNCE_SETTLE_MS); // confirm it's a real transition, not switch bounce
+  level = digitalRead(REED_PIN);
+  open = (level == HIGH);
+  if (open == currentDoorOpen) return; // was just bounce, ignore
+
+  currentDoorOpen = open;
+  if (open) openCountToday++; else closeCountToday++;
+  Serial.printf("[door] mid-cycle transition detected: now %s\n", open ? "OPEN" : "CLOSED");
+}
+
 // Syncs the system clock to local time (needed only so updateDailyCounters()
 // can tell when local midnight has passed). The system clock survives deep
 // sleep once synced, so this only needs to run occasionally to correct
@@ -873,6 +942,7 @@ void runOtaWindow() {
   while (millis() - start < OTA_WINDOW_MS) {
     ArduinoOTA.handle();
     delay(10);
+    checkDoorPin();
   }
 }
 
