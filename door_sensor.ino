@@ -502,7 +502,7 @@ void sendDiscoveryConfig() {
     + "\"payload_off\":\"CLOSED\","
     + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
     + "\"availability_topic\":\"" + TOPIC_AVAILABILITY + "\","
-    + "\"device\":{\"identifiers\":[\"" + DEVICE_ID + "\"],\"name\":\"" + DEVICE_NAME + "\",\"manufacturer\":\"" + DEVICE_MANUFACTURER + "\",\"model\":\"" + DEVICE_MODEL + "\",\"sw_version\":\"" + FIRMWARE_VERSION + "\"}"
+    + "\"device\":{\"identifiers\":[\"" + DEVICE_ID + "\"],\"name\":\"" + DEVICE_NAME + "\",\"manufacturer\":\"" + DEVICE_MANUFACTURER + "\",\"model\":\"" + DEVICE_MODEL + "\",\"sw_version\":\"" + FIRMWARE_VERSION + "\",\"hw_version\":\"" + DEVICE_HW_VERSION + "\"}"
     + "}";
   bool doorOk = publishQos1(DISCOVERY_DOOR, doorPayload, true);
   Serial.printf("[debug] Door discovery publish: %s\n", doorOk ? "OK" : "FAILED");
