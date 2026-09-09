@@ -75,6 +75,14 @@ const uint32_t MQTT_CONNECT_ATTEMPTS   = 3;
 const uint32_t MQTT_PUBLISH_ACK_TIMEOUT_MS = 2000; // per attempt
 const uint32_t MQTT_PUBLISH_ATTEMPTS   = 3;
 const uint32_t DEBOUNCE_SETTLE_MS      = 50;
+// A candidate door-state transition must hold for this many consecutive
+// samples (each DEBOUNCE_SETTLE_MS apart) before it's trusted -- rejects
+// switch bounce and RF pickup from the WiFi radio's own TX bursts landing
+// on this GPIO. Raise DOOR_DEBOUNCE_SAMPLES if false OPEN/CLOSED readings
+// keep happening; DOOR_DEBOUNCE_MAX_ATTEMPTS bounds the worst case so a
+// genuinely noisy line doesn't stall the device forever.
+const int DOOR_DEBOUNCE_SAMPLES       = 4;
+const int DOOR_DEBOUNCE_MAX_ATTEMPTS  = 12;
 const uint32_t OTA_WINDOW_MS           = 5UL * 60 * 1000UL; // how long to stay awake for OTA once triggered
 const uint32_t OTA_SUBSCRIBE_WAIT_MS   = 1000; // time to wait for a retained OTA command after subscribing
 

@@ -39,6 +39,10 @@
  *     device is busy on the network still gets caught, counted, and
  *     reported -- not just whichever state it happened to be in at the
  *     single moment it was originally read
+ *   - Every read of the reed switch (at wake, and mid-cycle) requires
+ *     several consecutive agreeing samples before it's trusted, to reject
+ *     switch bounce and RF pickup from the WiFi radio's own TX bursts
+ *     landing on this GPIO -- see readStableDoorOpen()
  *
  * Libraries required (Library Manager):
  *   - espMqttClient (Bert Melis)
@@ -178,6 +182,7 @@ String wakeupCauseToString(esp_sleep_wakeup_cause_t cause);
 void updateDailyCounters(bool doorOpen, esp_sleep_wakeup_cause_t wakeupCause);
 void syncLocalTimeIfDue();
 void checkDoorPin();
+bool readStableDoorOpen();
 void onMqttConnect(bool sessionPresent);
 void onMqttDisconnect(espMqttClientTypes::DisconnectReason reason);
 void onMqttPublish(uint16_t packetId);
@@ -203,16 +208,16 @@ void setup() {
   bootCount++;
 
   pinMode(REED_PIN, INPUT_PULLUP);
-  delay(DEBOUNCE_SETTLE_MS); // let the contact settle before reading
+  delay(DEBOUNCE_SETTLE_MS); // let the pin electrically settle after enabling the pull-up
 
-  int pinLevel = digitalRead(REED_PIN);
-  bool doorOpen = (pinLevel == HIGH); // circuit broken (no magnet) = open
+  bool doorOpen = readStableDoorOpen(); // multi-sample debounce -- see its own comment for why
   currentDoorOpen = doorOpen; // kept fresh by checkDoorPin() as this cycle progresses
   bool lastReportedDoorOpen = doorOpen; // what MQTT was last actually told, for the final catch-up check
 
   esp_sleep_wakeup_cause_t wakeupCause = esp_sleep_get_wakeup_cause();
-  Serial.printf("Boot #%lu, wakeup cause: %s (%d), door pin level: %d\n",
-                bootCount, wakeupCauseToString(wakeupCause).c_str(), wakeupCause, pinLevel);
+  Serial.printf("Boot #%lu, wakeup cause: %s (%d), door: %s\n",
+                bootCount, wakeupCauseToString(wakeupCause).c_str(), wakeupCause,
+                doorOpen ? "OPEN" : "CLOSED");
 
   // Uses whatever the system clock already holds (it survives deep sleep
   // once synced -- see syncLocalTimeIfDue()) rather than requiring a fresh
@@ -899,18 +904,48 @@ void updateDailyCounters(bool doorOpen, esp_sleep_wakeup_cause_t wakeupCause) {
 // non-nested points -- see publishState()'s caller and the final check
 // right before sleep in setup().
 void checkDoorPin() {
-  int level = digitalRead(REED_PIN);
-  bool open = (level == HIGH);
-  if (open == currentDoorOpen) return;
+  bool open = (digitalRead(REED_PIN) == HIGH);
+  if (open == currentDoorOpen) return; // fast path: no change, cheap single read
 
-  delay(DEBOUNCE_SETTLE_MS); // confirm it's a real transition, not switch bounce
-  level = digitalRead(REED_PIN);
-  open = (level == HIGH);
-  if (open == currentDoorOpen) return; // was just bounce, ignore
+  // Candidate transition -- hand off to the same multi-sample debounce used
+  // at wake, rather than trusting a single confirm-read. A brief single
+  // glitch (switch bounce, or RF pickup from the WiFi radio's own TX
+  // bursts landing on this GPIO) can otherwise read as a real transition.
+  open = readStableDoorOpen();
+  if (open == currentDoorOpen) return; // settled back to where it started -- was noise
 
   currentDoorOpen = open;
   if (open) openCountToday++; else closeCountToday++;
   Serial.printf("[door] mid-cycle transition detected: now %s\n", open ? "OPEN" : "CLOSED");
+}
+
+// Requires DOOR_DEBOUNCE_SAMPLES consecutive agreeing reads (each
+// DEBOUNCE_SETTLE_MS apart, restarting the streak whenever a read disagrees)
+// before trusting the reed switch's level. A single confirm-read isn't a
+// strong enough filter against switch bounce or RF pickup from the WiFi
+// radio's own TX bursts landing on this GPIO -- both can hold a wrong level
+// for longer than one sample interval. Falls back to whatever the last
+// sample was if the line never fully settles within DOOR_DEBOUNCE_MAX_ATTEMPTS,
+// rather than hanging indefinitely on a genuinely noisy line.
+bool readStableDoorOpen() {
+  bool candidate = (digitalRead(REED_PIN) == HIGH);
+  int agreeCount = 1;
+  int attempts = 1;
+  while (agreeCount < DOOR_DEBOUNCE_SAMPLES && attempts < DOOR_DEBOUNCE_MAX_ATTEMPTS) {
+    delay(DEBOUNCE_SETTLE_MS);
+    bool sample = (digitalRead(REED_PIN) == HIGH);
+    attempts++;
+    if (sample == candidate) {
+      agreeCount++;
+    } else {
+      candidate = sample;
+      agreeCount = 1;
+    }
+  }
+  if (agreeCount < DOOR_DEBOUNCE_SAMPLES) {
+    Serial.println("[door] pin never settled during debounce -- using last sample.");
+  }
+  return candidate;
 }
 
 // Syncs the system clock to local time (needed only so updateDailyCounters()
