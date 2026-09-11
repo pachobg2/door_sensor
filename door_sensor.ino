@@ -5,7 +5,13 @@
  * Wiring:
  *   Reed switch: one leg -> GPIO4, other leg -> GND (+ external 10k pull-up
  *     from GPIO4 to 3.3V -- needed for reliable wake on the closed->open
- *     transition, see notes in armWakeup())
+ *     transition, see notes in armWakeup()). Pin is run as plain INPUT (not
+ *     INPUT_PULLUP) while awake -- this external pull-up is the only one on
+ *     the line; doubling it with the internal pull-up made the reed
+ *     switch's closed-to-GND path fight two parallel pull-ups to read a
+ *     clean LOW, while OPEN had nothing opposing it, so real close events
+ *     could read as "still open" on a switch whose closed contact isn't a
+ *     perfect hard short.
  *   Battery voltage divider: midpoint -> GPIO1 (ADC)
  *
  * Behavior:
@@ -207,8 +213,18 @@ void setup() {
 
   bootCount++;
 
-  pinMode(REED_PIN, INPUT_PULLUP);
-  delay(DEBOUNCE_SETTLE_MS); // let the pin electrically settle after enabling the pull-up
+  // Plain INPUT, not INPUT_PULLUP: the board already has an external 10k
+  // pull-up to 3.3V on this pin (see the wiring note above). Adding the
+  // internal pull-up (~45k) on top of that means the reed switch's
+  // closed-to-GND path has to fight TWO parallel pull-ups to read a clean
+  // LOW, while OPEN has nothing opposing it at all (pure float pulled
+  // high) -- that asymmetry is enough for a switch whose closed contact
+  // isn't a perfect hard short (ordinary contact wear, a slightly marginal
+  // magnet gap) to never read reliably LOW, so real close events get
+  // misread as "still open." Relying on the external pull-up alone halves
+  // what the switch has to overcome on close, with no downside for open.
+  pinMode(REED_PIN, INPUT);
+  delay(DEBOUNCE_SETTLE_MS); // let the pin electrically settle
 
   bool doorOpen = readStableDoorOpen(); // multi-sample debounce -- see its own comment for why
   currentDoorOpen = doorOpen; // kept fresh by checkDoorPin() as this cycle progresses
