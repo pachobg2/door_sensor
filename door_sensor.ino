@@ -49,6 +49,10 @@
  *     several consecutive agreeing samples before it's trusted, to reject
  *     switch bounce and RF pickup from the WiFi radio's own TX bursts
  *     landing on this GPIO -- see readStableDoorOpen()
+ *   - Records the date of the last time the battery read 100% (in flash/NVS,
+ *     not RTC memory, so it survives an actual battery depletion, not just
+ *     deep sleep) -- lets you tell how long a charge actually lasted by
+ *     comparing this date to whenever the device later goes quiet
  *
  * Libraries required (Library Manager):
  *   - espMqttClient (Bert Melis)
@@ -58,6 +62,7 @@
 #include <WiFi.h>
 #include <espMqttClient.h>
 #include <ArduinoOTA.h>
+#include <Preferences.h>
 #include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -89,6 +94,7 @@ String TOPIC_CLOSE_COUNT_TODAY = String("home/") + DEVICE_ID + "/close_count_tod
 String TOPIC_BOOT_RESET_CMD    = String("home/") + DEVICE_ID + "/boot_count_reset/set";
 String TOPIC_BOOT_RESET_STATE  = String("home/") + DEVICE_ID + "/boot_count_reset/state";
 String TOPIC_OTA_ACTIVE = String("home/") + DEVICE_ID + "/ota_active";
+String TOPIC_LAST_FULL_CHARGE = String("home/") + DEVICE_ID + "/last_full_charge";
 
 // Home Assistant MQTT discovery topics
 String DISCOVERY_DOOR    = String("homeassistant/binary_sensor/") + DEVICE_ID + "/door/config";
@@ -104,6 +110,7 @@ String DISCOVERY_OPEN_COUNT_TODAY  = String("homeassistant/sensor/") + DEVICE_ID
 String DISCOVERY_CLOSE_COUNT_TODAY = String("homeassistant/sensor/") + DEVICE_ID + "/close_count_today/config";
 String DISCOVERY_BOOT_RESET = String("homeassistant/switch/") + DEVICE_ID + "/boot_count_reset/config";
 String DISCOVERY_OTA_ACTIVE = String("homeassistant/binary_sensor/") + DEVICE_ID + "/ota_active/config";
+String DISCOVERY_LAST_FULL_CHARGE = String("homeassistant/sensor/") + DEVICE_ID + "/last_full_charge/config";
 
 // ---------------- Persisted state (survives deep sleep) ----------------
 
@@ -120,6 +127,7 @@ RTC_DATA_ATTR uint32_t closeCountToday = 0;
 // ---------------- Globals ----------------
 
 espMqttClient mqttClient; // uses its own background task on ESP32 -- no manual loop() needed
+Preferences batteryPrefs; // flash/NVS, not RTC memory -- survives an actual battery depletion
 
 // Set by the onConnect/onPublish callbacks, which fire from the client's
 // background task. Polled from the main setup()/loop() flow below.
@@ -189,6 +197,7 @@ void updateDailyCounters(bool doorOpen, esp_sleep_wakeup_cause_t wakeupCause);
 void syncLocalTimeIfDue();
 void checkDoorPin();
 bool readStableDoorOpen();
+String updateAndGetLastFullChargeDate(float batteryPercent);
 void onMqttConnect(bool sessionPresent);
 void onMqttDisconnect(espMqttClientTypes::DisconnectReason reason);
 void onMqttPublish(uint16_t packetId);
@@ -606,6 +615,22 @@ void sendDiscoveryConfig() {
     + "}";
   publishQos1(DISCOVERY_BATTERY_LOW, battLowPayload, true);
 
+  // Last full charge date -- device_class "date" (not "timestamp": we only
+  // ever record a calendar day, not a time-of-day). No expire_after: this
+  // is a record of a past event, not a live reading, and should stay
+  // visible even across a long gap between full charges.
+  String lastFullChargePayload = String("{")
+    + "\"name\":\"" + DEVICE_NAME + " Last Full Charge\","
+    + "\"unique_id\":\"" + DEVICE_ID + "_last_full_charge\","
+    + "\"device_class\":\"date\","
+    + "\"entity_category\":\"diagnostic\","
+    + "\"icon\":\"mdi:battery-charging-100\","
+    + "\"state_topic\":\"" + TOPIC_LAST_FULL_CHARGE + "\","
+    + "\"availability_topic\":\"" + TOPIC_AVAILABILITY + "\","
+    + "\"device\":{\"identifiers\":[\"" + DEVICE_ID + "\"]}"
+    + "}";
+  publishQos1(DISCOVERY_LAST_FULL_CHARGE, lastFullChargePayload, true);
+
   // WiFi signal strength sensor discovery payload
   String rssiPayload = String("{")
     + "\"name\":\"" + DEVICE_NAME + " WiFi Signal\","
@@ -771,6 +796,11 @@ int publishState(bool doorOpen, float batteryVoltage, float batteryPercent, int 
   bool batteryLow = batteryPercent < BATTERY_LOW_THRESHOLD_PCT;
   if (!publishQos1(TOPIC_BATTERY_LOW, batteryLow ? "ON" : "OFF", true)) failed++;
 
+  String lastFullChargeDate = updateAndGetLastFullChargeDate(batteryPercent);
+  if (lastFullChargeDate.length() > 0) {
+    if (!publishQos1(TOPIC_LAST_FULL_CHARGE, lastFullChargeDate, true)) failed++;
+  }
+
   char rssiStr[8];
   snprintf(rssiStr, sizeof(rssiStr), "%d", rssi);
   if (!publishQos1(TOPIC_RSSI, rssiStr, true)) failed++;
@@ -795,6 +825,42 @@ int publishState(bool doorOpen, float batteryVoltage, float batteryPercent, int 
 }
 
 // ---------------- Battery ----------------
+
+// Detects a rising edge into 100% battery (i.e. "just charged", not "still
+// sitting at 100% from before") and records today's date as the new last-
+// full-charge date. Persisted in flash/NVS rather than RTC memory
+// specifically so it survives an actual battery depletion -- comparing
+// this date to whenever the device later goes quiet is how you tell how
+// long a charge actually lasted. Returns whatever date is currently
+// stored (possibly still empty, if the battery has never yet read 100%
+// since this was added).
+//
+// If the clock hasn't synced yet (g_timeSynced false) when a rising edge
+// happens, wasAt100 still gets set so this doesn't re-trigger every wake,
+// but no date gets recorded -- a one-time, cosmetic gap on a device's
+// very first-ever boot, same class of edge case as updateDailyCounters().
+String updateAndGetLastFullChargeDate(float batteryPercent) {
+  batteryPrefs.begin("battery", false);
+  bool wasAt100 = batteryPrefs.getBool("wasAt100", false);
+  bool isAt100 = batteryPercent >= 100.0f;
+
+  if (isAt100 && !wasAt100 && g_timeSynced) {
+    time_t now = time(nullptr);
+    struct tm t;
+    localtime_r(&now, &t);
+    char buf[11];
+    strftime(buf, sizeof(buf), "%Y-%m-%d", &t);
+    batteryPrefs.putString("lastFullDate", buf);
+    Serial.printf("[battery] reached 100%% -- recorded last full charge date: %s\n", buf);
+  }
+  if (isAt100 != wasAt100) {
+    batteryPrefs.putBool("wasAt100", isAt100);
+  }
+
+  String result = batteryPrefs.getString("lastFullDate", "");
+  batteryPrefs.end();
+  return result;
+}
 
 // Applies this board's own raw-vs-actual voltage correction (BATT_CAL in
 // config.h). Defaults to identity (no correction) until calibrated.
