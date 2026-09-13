@@ -95,6 +95,7 @@ Base topic: `home/<DEVICE_ID>/...`
 | Last full charge date | `home/<id>/last_full_charge` | `YYYY-MM-DD` |
 | Open count today | `home/<id>/open_count_today` | integer, resets at local midnight |
 | Close count today | `home/<id>/close_count_today` | integer, resets at local midnight |
+| Count mismatch | `home/<id>/count_mismatch` | `ok` / `fail_open` / `fail_close` |
 | WiFi signal | `home/<id>/wifi_signal` | dBm |
 | Availability (LWT) | `home/<id>/status` | `online` / `offline` |
 | Boot count | `home/<id>/boot_count` | integer |
@@ -118,6 +119,18 @@ and just vanish. Flipping the switch sets a retained flag; the device
 consumes it on its next natural wake and reports back `OFF`, which reads
 as a momentary action in the UI even though the wire protocol underneath
 is a switch.
+
+### Count-mismatch detection
+
+A door can only open and close one at a time, so `open_count_today` and
+`close_count_today` can only ever be equal or differ by exactly 1 — which
+side is "ahead" depends on whatever state the door was already in when the
+counters last reset, but the gap between them never exceeds 1 for a
+physically real door. If it ever does, a real transition was never
+counted somewhere (a missed wake, a debounce that gave up and fell back
+to the wrong reading, etc.), and `count_mismatch` reports which direction:
+`fail_close` if opens are outpacing closes (closes are the ones being
+missed), `fail_open` if it's the other way around.
 
 ## Config file
 
@@ -148,3 +161,4 @@ change.
 | v1.3.1 | 2026-09-09 | Debounce strengthened to require several consecutive agreeing samples, rejecting switch bounce / WiFi-TX RF pickup that a single confirm-read let through. |
 | v1.3.2 | 2026-09-11 | Fixed close events not registering: stopped combining `INPUT_PULLUP` with the external pull-up, which made the reed switch fight two parallel pull-ups to read a clean LOW on close. |
 | v1.3.3 | 2026-09-12 | Last-full-charge date diagnostic (flash/NVS-backed, survives an actual battery depletion). |
+| v1.3.4 | 2026-09-13 | Count-mismatch diagnostic (`ok`/`fail_open`/`fail_close`) — flags when `open_count_today`/`close_count_today` drift more than 1 apart, which is physically impossible for a door and means a real transition was never counted. |

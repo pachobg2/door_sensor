@@ -53,6 +53,10 @@
  *     not RTC memory, so it survives an actual battery depletion, not just
  *     deep sleep) -- lets you tell how long a charge actually lasted by
  *     comparing this date to whenever the device later goes quiet
+ *   - Flags a count-mismatch fault ("fail_open"/"fail_close") if
+ *     open_count_today and close_count_today ever drift more than 1 apart --
+ *     physically impossible for a door, so it means a real transition was
+ *     never counted somewhere -- see countMismatchState()
  *
  * Libraries required (Library Manager):
  *   - espMqttClient (Bert Melis)
@@ -91,6 +95,7 @@ String TOPIC_FAIL_COUNT  = String("home/") + DEVICE_ID + "/connect_fail_count";
 String TOPIC_TOTAL_FAIL_COUNT = String("home/") + DEVICE_ID + "/total_fail_count";
 String TOPIC_OPEN_COUNT_TODAY  = String("home/") + DEVICE_ID + "/open_count_today";
 String TOPIC_CLOSE_COUNT_TODAY = String("home/") + DEVICE_ID + "/close_count_today";
+String TOPIC_COUNT_MISMATCH = String("home/") + DEVICE_ID + "/count_mismatch";
 String TOPIC_BOOT_RESET_CMD    = String("home/") + DEVICE_ID + "/boot_count_reset/set";
 String TOPIC_BOOT_RESET_STATE  = String("home/") + DEVICE_ID + "/boot_count_reset/state";
 String TOPIC_OTA_ACTIVE = String("home/") + DEVICE_ID + "/ota_active";
@@ -108,6 +113,7 @@ String DISCOVERY_FAIL_COUNT  = String("homeassistant/sensor/") + DEVICE_ID + "/c
 String DISCOVERY_TOTAL_FAIL_COUNT = String("homeassistant/sensor/") + DEVICE_ID + "/total_fail_count/config";
 String DISCOVERY_OPEN_COUNT_TODAY  = String("homeassistant/sensor/") + DEVICE_ID + "/open_count_today/config";
 String DISCOVERY_CLOSE_COUNT_TODAY = String("homeassistant/sensor/") + DEVICE_ID + "/close_count_today/config";
+String DISCOVERY_COUNT_MISMATCH = String("homeassistant/sensor/") + DEVICE_ID + "/count_mismatch/config";
 String DISCOVERY_BOOT_RESET = String("homeassistant/switch/") + DEVICE_ID + "/boot_count_reset/config";
 String DISCOVERY_OTA_ACTIVE = String("homeassistant/binary_sensor/") + DEVICE_ID + "/ota_active/config";
 String DISCOVERY_LAST_FULL_CHARGE = String("homeassistant/sensor/") + DEVICE_ID + "/last_full_charge/config";
@@ -194,6 +200,7 @@ float batteryPercentage(float v);
 float calibrateBatteryVoltage(float raw);
 String wakeupCauseToString(esp_sleep_wakeup_cause_t cause);
 void updateDailyCounters(bool doorOpen, esp_sleep_wakeup_cause_t wakeupCause);
+String countMismatchState();
 void syncLocalTimeIfDue();
 void checkDoorPin();
 bool readStableDoorOpen();
@@ -674,6 +681,23 @@ void sendDiscoveryConfig() {
     + "}";
   publishQos1(DISCOVERY_CLOSE_COUNT_TODAY, closeCountPayload, true);
 
+  // Count-mismatch diagnostic. States: "ok", "fail_open" (opens are being
+  // missed), "fail_close" (closes are being missed) -- see
+  // countMismatchState()'s own comment for the reasoning. Not a
+  // binary_sensor: there are two distinct failure directions to
+  // distinguish, not just a single problem/no-problem flag.
+  String countMismatchPayload = String("{")
+    + "\"name\":\"" + DEVICE_NAME + " Count Mismatch\","
+    + "\"unique_id\":\"" + DEVICE_ID + "_count_mismatch\","
+    + "\"entity_category\":\"diagnostic\","
+    + "\"icon\":\"mdi:alert-circle-outline\","
+    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"state_topic\":\"" + TOPIC_COUNT_MISMATCH + "\","
+    + "\"availability_topic\":\"" + TOPIC_AVAILABILITY + "\","
+    + "\"device\":{\"identifiers\":[\"" + DEVICE_ID + "\"]}"
+    + "}";
+  publishQos1(DISCOVERY_COUNT_MISMATCH, countMismatchPayload, true);
+
   // Boot count sensor discovery payload (diagnostic -- total wakes since last full reset)
   String bootCountPayload = String("{")
     + "\"name\":\"" + DEVICE_NAME + " Boot Count\","
@@ -810,6 +834,7 @@ int publishState(bool doorOpen, float batteryVoltage, float batteryPercent, int 
   if (!publishQos1(TOPIC_TOTAL_FAIL_COUNT, String(totalFailCount), true)) failed++;
   if (!publishQos1(TOPIC_OPEN_COUNT_TODAY, String(openCountToday), true)) failed++;
   if (!publishQos1(TOPIC_CLOSE_COUNT_TODAY, String(closeCountToday), true)) failed++;
+  if (!publishQos1(TOPIC_COUNT_MISMATCH, countMismatchState(), true)) failed++;
 
   // Always OFF here -- this runs before the OTA check below. Also acts as a
   // safety net: if the device somehow died mid-OTA on a previous wake, the
@@ -963,6 +988,24 @@ void updateDailyCounters(bool doorOpen, esp_sleep_wakeup_cause_t wakeupCause) {
   if (wakeupCause == ESP_SLEEP_WAKEUP_GPIO) {
     if (doorOpen) openCountToday++; else closeCountToday++;
   }
+}
+
+// A door can only open and close one at a time, so over any stretch since
+// the daily counters last reset, open_count_today and close_count_today
+// can only ever be equal or differ by exactly 1 -- whichever count started
+// the stretch "ahead" depends on whatever state the door was already in
+// at the moment of the reset, but the *gap* between the two never exceeds
+// 1 for a physically real door. A gap of 2 or more means a real transition
+// was never counted somewhere along the way (a missed wake, a debounce
+// that gave up and fell back to the wrong reading, etc.) -- and whichever
+// count is the lower one identifies which direction is failing to
+// register, since it's the one missing an event the other side already
+// saw happen.
+String countMismatchState() {
+  int32_t diff = (int32_t)openCountToday - (int32_t)closeCountToday;
+  if (diff >= 2)  return "fail_close"; // opens outpacing closes -> closes are being missed
+  if (diff <= -2) return "fail_open";  // closes outpacing opens -> opens are being missed
+  return "ok";
 }
 
 // ---------------- Door pin polling ----------------
