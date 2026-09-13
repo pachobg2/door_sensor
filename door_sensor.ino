@@ -57,9 +57,12 @@
  *     open_count_today and close_count_today ever drift more than 1 apart --
  *     physically impossible for a door, so it means a real transition was
  *     never counted somewhere -- see countMismatchState()
- *   - Waits for the clean MQTT disconnect to actually finish (not a blind
- *     fixed delay) before tearing down WiFi and sleeping, so the broker is
- *     less likely to see an abrupt drop and fire the Last Will
+ *   - Gives the clean MQTT disconnect a fixed real-time delay
+ *     (MQTT_DISCONNECT_DELAY_MS) before tearing down WiFi and sleeping, so
+ *     the broker is less likely to see an abrupt drop and fire the Last
+ *     Will -- deliberately not a poll on mqttClient.connected(), which
+ *     isn't a reliable signal for whether the disconnect packet actually
+ *     went out yet
  *
  * Libraries required (Library Manager):
  *   - espMqttClient (Bert Melis)
@@ -355,18 +358,16 @@ void setup() {
   }
 
   // Clean (non-forced) disconnect: the library sends any remaining queued
-  // messages before closing the connection. Wait for it to actually
-  // complete -- not just a blind fixed delay -- before tearing down WiFi,
-  // or the broker sees an abrupt drop and fires the Last Will anyway
-  // (marking the device "offline" on the broker, silently, until the next
-  // wake reconnects and corrects it -- no error on this side, and nothing
-  // in HA's logbook either, since an availability-topic flip isn't a
-  // value change; it only shows up as a gap in each entity's own history).
+  // messages before closing the connection. A fixed delay, not a poll on
+  // connected() -- that flag almost certainly flips false synchronously
+  // the instant disconnect() is called, before the actual DISCONNECT
+  // packet goes out on the library's background task, which would make a
+  // connected()-based wait exit immediately every time instead of only
+  // occasionally being too short (confirmed: v1.3.5 made this worse, not
+  // better, replacing a "sometimes" broker-side Last Will misfire with an
+  // "every time" one). Give it real, unconditional wall-clock time instead.
   mqttClient.disconnect();
-  unsigned long disconnectStart = millis();
-  while (mqttClient.connected() && millis() - disconnectStart < MQTT_DISCONNECT_TIMEOUT_MS) {
-    delay(10);
-  }
+  delay(MQTT_DISCONNECT_DELAY_MS);
   WiFi.disconnect(true);
 
   stopAwakeWatchdog(); // about to sleep on our own terms, no need for the failsafe to fire mid-sleep

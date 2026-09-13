@@ -74,12 +74,15 @@ const uint32_t MQTT_CONNECT_TIMEOUT_MS = 5000;   // per attempt
 const uint32_t MQTT_CONNECT_ATTEMPTS   = 3;
 const uint32_t MQTT_PUBLISH_ACK_TIMEOUT_MS = 2000; // per attempt
 const uint32_t MQTT_PUBLISH_ATTEMPTS   = 3;
-// How long to wait for the clean disconnect() to actually finish sending
-// before tearing down WiFi and sleeping. Too short and the broker
-// sometimes sees an abrupt drop instead of a clean one, firing the Last
-// Will (silent on this side -- shows up only as a brief "unavailable" gap
-// in HA until the next wake corrects it).
-const uint32_t MQTT_DISCONNECT_TIMEOUT_MS = 800;
+// Fixed (unconditional) delay after the clean disconnect() call, giving
+// the library's background task real wall-clock time to actually send the
+// DISCONNECT packet before WiFi gets torn down and the device sleeps. Too
+// short and the broker sometimes sees an abrupt drop instead of a clean
+// one, firing the Last Will (silent on this side -- shows up only as a
+// brief "unavailable" gap in HA until the next wake corrects it). This is
+// NOT a poll on mqttClient.connected() -- that flag isn't a reliable
+// "has it actually sent yet" signal, so don't try to shortcut this wait.
+const uint32_t MQTT_DISCONNECT_DELAY_MS = 400;
 const uint32_t DEBOUNCE_SETTLE_MS      = 50;
 // A candidate door-state transition must hold for this many consecutive
 // samples (each DEBOUNCE_SETTLE_MS apart) before it's trusted -- rejects
