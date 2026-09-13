@@ -57,6 +57,9 @@
  *     open_count_today and close_count_today ever drift more than 1 apart --
  *     physically impossible for a door, so it means a real transition was
  *     never counted somewhere -- see countMismatchState()
+ *   - Waits for the clean MQTT disconnect to actually finish (not a blind
+ *     fixed delay) before tearing down WiFi and sleeping, so the broker is
+ *     less likely to see an abrupt drop and fire the Last Will
  *
  * Libraries required (Library Manager):
  *   - espMqttClient (Bert Melis)
@@ -352,11 +355,18 @@ void setup() {
   }
 
   // Clean (non-forced) disconnect: the library sends any remaining queued
-  // messages before closing the connection. Give it a moment to actually
-  // complete before tearing down WiFi, or the broker sees an abrupt drop
-  // and fires the Last Will (marking the device "offline") anyway.
+  // messages before closing the connection. Wait for it to actually
+  // complete -- not just a blind fixed delay -- before tearing down WiFi,
+  // or the broker sees an abrupt drop and fires the Last Will anyway
+  // (marking the device "offline" on the broker, silently, until the next
+  // wake reconnects and corrects it -- no error on this side, and nothing
+  // in HA's logbook either, since an availability-topic flip isn't a
+  // value change; it only shows up as a gap in each entity's own history).
   mqttClient.disconnect();
-  delay(300);
+  unsigned long disconnectStart = millis();
+  while (mqttClient.connected() && millis() - disconnectStart < MQTT_DISCONNECT_TIMEOUT_MS) {
+    delay(10);
+  }
   WiFi.disconnect(true);
 
   stopAwakeWatchdog(); // about to sleep on our own terms, no need for the failsafe to fire mid-sleep

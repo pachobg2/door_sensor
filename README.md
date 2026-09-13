@@ -162,3 +162,4 @@ change.
 | v1.3.2 | 2026-09-11 | Fixed close events not registering: stopped combining `INPUT_PULLUP` with the external pull-up, which made the reed switch fight two parallel pull-ups to read a clean LOW on close. |
 | v1.3.3 | 2026-09-12 | Last-full-charge date diagnostic (flash/NVS-backed, survives an actual battery depletion). |
 | v1.3.4 | 2026-09-13 | Count-mismatch diagnostic (`ok`/`fail_open`/`fail_close`) — flags when `open_count_today`/`close_count_today` drift more than 1 apart, which is physically impossible for a door and means a real transition was never counted. |
+| v1.3.5 | 2026-09-13 | Fixed occasional spurious "unavailable" in HA with nothing in the logbook (an availability-topic flip, not a value change): the clean MQTT disconnect before sleep now waits (`MQTT_DISCONNECT_TIMEOUT_MS`) for the disconnect to actually finish instead of a blind fixed delay, so the broker is less likely to see an abrupt drop and fire the Last Will. |
