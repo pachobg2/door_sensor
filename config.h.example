@@ -1,31 +1,13 @@
 #pragma once
 
-// Rename this file to config.h and fill in your real values.
-// config.h holds this device's full configuration — credentials, network,
-// identity, and hardware settings. Keep it out of git (see .gitignore).
-
-// ------------------------------------------------------------------
-// WiFi
-// ------------------------------------------------------------------
-const char* WIFI_SSID       = "your-wifi-ssid";
-const char* WIFI_PASSWORD   = "your-wifi-password";
-
-// Optional: pin to a known BSSID / static IP to speed up connect time.
-// Leave BSSID all-zero to disable pinning.
-uint8_t WIFI_BSSID[6]       = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-const bool USE_STATIC_IP    = true;
-IPAddress STATIC_IP(192, 168, 1, 211);
-IPAddress GATEWAY(192, 168, 1, 1);
-IPAddress SUBNET(255, 255, 255, 0);
-IPAddress DNS_SERVER(192, 168, 1, 1);
-
-// ------------------------------------------------------------------
-// MQTT broker
-// ------------------------------------------------------------------
-const char* MQTT_BROKER     = "192.168.1.10";
-const uint16_t MQTT_PORT    = 1883;
-const char* MQTT_USER       = "mqttuser";
-const char* MQTT_PASSWORD   = "mqttpass";
+// Rename this file to config.h and adjust if needed.
+// Unlike before v2.0.0, this file no longer holds WiFi/MQTT credentials or
+// device identity -- those are configured at runtime via the built-in web
+// setup portal (see runMaintenanceMode() in the .ino) and persisted in NVS,
+// same system as temp_humidity_sensor_v4. What's left here is OTA password,
+// hardware pins, battery calibration, and timing constants. Keep it out of
+// git (see .gitignore) regardless -- in case you ever add something
+// sensitive to it.
 
 // ------------------------------------------------------------------
 // OTA (ArduinoOTA, triggered remotely via the "OTA Update" MQTT switch —
@@ -34,10 +16,21 @@ const char* MQTT_PASSWORD   = "mqttpass";
 const char* OTA_PASSWORD    = "choose-an-ota-password";
 
 // ------------------------------------------------------------------
-// Device identity
+// Setup portal
 // ------------------------------------------------------------------
-const char* DEVICE_ID           = "door_sensor_1";
-const char* DEVICE_NAME         = "Door Sensor 1";
+// Password for this device's own temporary setup WiFi network (e.g.
+// "P@cho P.Door XXXX"). MUST be 8-63 characters -- that's a hard WPA2
+// requirement, not just this library's preference. It's only broadcast
+// while the portal is open, not during normal operation.
+const char* AP_PASSWORD = "setup1234";
+// How long the setup portal stays open before giving up and going back to
+// sleep with whatever settings it already had.
+const uint32_t PORTAL_TIMEOUT_SEC = 600; // 10 min
+
+// ------------------------------------------------------------------
+// Device identity (firmware facts, not user settings -- device ID/name are
+// configured at runtime via the setup portal instead)
+// ------------------------------------------------------------------
 const char* DEVICE_MANUFACTURER = "P@cho";
 const char* DEVICE_MODEL        = "P.Door";
 const char* DEVICE_HW_VERSION   = "1.1";

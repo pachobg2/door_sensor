@@ -2,17 +2,20 @@
 
 Reed switch → MQTT (QoS 1, confirmed) → Home Assistant (via MQTT
 discovery). Wakes on a door open/close, plus a periodic heartbeat, reports
-state and battery, then goes back to deep sleep. Software-triggered OTA
-(no spare GPIO for a physical button), daily open/close counters, and a
-last-full-charge date to track battery life — see **Behavior** below.
+state and battery, then goes back to deep sleep. WiFi/MQTT/device identity
+are configured at runtime via a built-in web setup portal (as of v2.0.0),
+software-triggered OTA/setup/factory-reset (no spare GPIO for a physical
+button), daily open/close counters, and a last-full-charge date to track
+battery life — see **Behavior** below.
 
 ## Files
 
 - `door_sensor.ino` — the sketch.
-- `config.h.example` — copy to `config.h` and fill in: WiFi/MQTT/OTA
-  credentials, static IP, device identity, hardware pins, timing, and
+- `config.h.example` — copy to `config.h` and fill in: OTA credentials,
+  setup-portal AP password, hardware pins, battery calibration, timing, and
   debounce settings. Keep `config.h` out of git (already covered by
-  `.gitignore`).
+  `.gitignore`). WiFi, MQTT, and device identity are **not** in here as of
+  v2.0.0 — see **Setup** below.
 
 ## Hardware
 
@@ -59,39 +62,86 @@ last-full-charge date to track battery life — see **Behavior** below.
 - HA discovery configs carry an `expire_after` so a dead device eventually
   shows "unavailable" instead of a door state frozen forever at its last
   value.
+- Battery voltage carries an HA-adjustable calibration offset (a plain
+  volts-added correction, "Battery Calibration Offset" number entity), on
+  top of the compiled-in `BATT_CAL` curve in `config.h` — same mechanism as
+  `temp_humidity_sensor_v4`.
+
+## Setup
+
+As of v2.0.0, WiFi, MQTT, and device identity are configured at runtime via
+a built-in WiFiManager web portal, not compiled into `config.h` — same
+system as `temp_humidity_sensor_v4`, adapted here for a board with no spare
+GPIO for a physical setup button:
+
+- **Never configured yet** (fresh flash, or after a factory reset): the
+  portal opens automatically on the very next boot. Connect to the "P@cho
+  DS 1 XXXX" WiFi network it broadcasts (password in `config.h`'s
+  `AP_PASSWORD`, or open if that's left too short), then browse to
+  `192.168.4.1` if it doesn't open on its own. Fill in your WiFi network,
+  MQTT broker, and device name/ID, optionally a static IP and/or a BSSID
+  pin (see the on-page network scan list), then Save — the device restarts
+  into normal operation.
+- **Already configured, want to change something**: flip the retained
+  **"Setup Mode"** MQTT switch in Home Assistant. The device reopens the
+  portal on its next natural wake (whichever comes first: a door event, or
+  the heartbeat — open/close the door once to force it immediately rather
+  than waiting up to `HEARTBEAT_INTERVAL_US`).
+- **Start over completely**: flip the retained **"Factory Reset"** MQTT
+  switch. This wipes every saved setting (WiFi/MQTT/identity/static
+  IP/BSSID/battery offset) and the radio's own persisted WiFi credentials,
+  then restarts unconfigured — the portal opens on the next boot as if the
+  device were never set up.
+- The portal has no live "in progress" indicator in Home Assistant the way
+  OTA does (see below) — WiFiManager takes the radio over into its own
+  access point while it's open, so the device can't reach the home MQTT
+  broker to report it. The portal's own landing page shows a **Device
+  status** box (door state, battery, WiFi/MQTT status, boot/fail counts)
+  read fresh each time you open it.
+- There's also no physical cancel gesture (no button) — a portal opened by
+  mistake just needs to time out (`PORTAL_TIMEOUT_SEC`, default 10 min).
+- Static IP is chosen by filling in the IP address field, not a checkbox —
+  a `WiFiManagerParameter` checkbox is fundamentally broken (it always
+  emits a duplicate HTML `value` attribute, confirmed against the library's
+  own source), so this project never uses one.
 
 ## Before building
 
 1. **Arduino IDE board package**: "esp32 by Espressif Systems", core 3.x+
    (uses the pin-based LEDC-free GPIO APIs, no special LEDC needed here).
 2. **Libraries** (Library Manager):
+   - `WiFiManager` by tzapu
    - `espMqttClient` by bertmelis
    - `ArduinoOTA`, `Preferences` (bundled with the ESP32 core)
 3. Select board **"ESP32C3 Dev Module"**.
-4. Copy `config.h.example` to `config.h` and fill in your WiFi/MQTT/OTA
-   values, static IP, and device identity.
+4. Copy `config.h.example` to `config.h` and fill in your OTA password,
+   setup-portal AP password, and (if this board's hardware differs)
+   battery calibration. WiFi/MQTT/device identity are set later, through
+   the setup portal — see **Setup** above.
 
 ## OTA updates
 
-This device has no spare GPIO for a physical OTA button (GPIO0 is used
-for the battery ADC), so OTA is triggered entirely from software: flip
-the retained **"OTA Update"** MQTT switch in Home Assistant, and the
-device picks it up on its next wake (door event or heartbeat), stays
-awake for up to `OTA_WINDOW_MS` (default 5 min) listening for a flash
-over `ArduinoOTA`, then resumes its normal sleep cycle. The **"OTA
-Active"** binary sensor is the only way to see OTA is in progress, since
-there's no status LED on this board.
+This device has no spare GPIO for a physical OTA button, so OTA is
+triggered entirely from software: flip the retained **"OTA Update"** MQTT
+switch in Home Assistant, and the device picks it up on its next wake
+(door event or heartbeat), stays awake for up to `OTA_WINDOW_MS` (default
+5 min) listening for a flash over `ArduinoOTA`, then resumes its normal
+sleep cycle. The **"OTA Active"** binary sensor is the only way to see OTA
+is in progress, since there's no status LED on this board.
 
 ## MQTT / Home Assistant
 
-Base topic: `home/<DEVICE_ID>/...`
+Base topic: `home/<device_id>/...` (device ID set through the setup
+portal, default `door_XXXXXX`).
 
 | Purpose | Topic | Payload |
 |---|---|---|
 | Door state | `home/<id>/door` | `OPEN` / `CLOSED` |
 | Battery voltage | `home/<id>/battery` | volts |
+| Battery voltage (raw) | `home/<id>/battery_voltage_raw` | volts, pre-calibration -- for comparing against a multimeter |
 | Battery percent | `home/<id>/battery_percent` | 0–100 |
 | Low-battery flag | `home/<id>/battery_low` | `ON` / `OFF` |
+| Battery calibration offset | `home/<id>/battery_cal_offset`, `.../set` | volts, -1 to 1 (persistent number entity, see below) |
 | Last full charge date | `home/<id>/last_full_charge` | `YYYY-MM-DD` |
 | Open count today | `home/<id>/open_count_today` | integer, resets at local midnight |
 | Close count today | `home/<id>/close_count_today` | integer, resets at local midnight |
@@ -104,21 +154,33 @@ Base topic: `home/<DEVICE_ID>/...`
 | Total fail count | `home/<id>/total_fail_count` | lifetime, never resets |
 | OTA trigger | `home/<id>/ota/set`, `.../state` | `ON` / `OFF` (retained switch) |
 | OTA in progress | `home/<id>/ota_active` | `ON` / `OFF` |
+| Setup Mode | `home/<id>/setup_mode/set`, `.../state` | `ON` / `OFF` (retained switch -- reopens the setup portal, see above) |
+| Factory Reset | `home/<id>/factory_reset/set`, `.../state` | `ON` / `OFF` (retained switch -- wipes settings, see above) |
 
 All published via retained HA discovery configs on
-`homeassistant/<component>/<DEVICE_ID>/.../config`, so entities show up in
+`homeassistant/<component>/<device_id>/.../config`, so entities show up in
 Home Assistant automatically once MQTT discovery is enabled.
 
 ### Retained-switch controls, not plain buttons
 
-Both **"OTA Update"** and **"Reset Boot Counter"** are implemented as
-retained MQTT switches rather than plain HA `button` entities. A button's
-press is a one-shot, non-retained message — since this device is asleep
-almost all the time, a press could easily land while nobody's subscribed
-and just vanish. Flipping the switch sets a retained flag; the device
-consumes it on its next natural wake and reports back `OFF`, which reads
-as a momentary action in the UI even though the wire protocol underneath
-is a switch.
+**"OTA Update"**, **"Reset Boot Counter"**, **"Setup Mode"**, and
+**"Factory Reset"** are all implemented as retained MQTT switches rather
+than plain HA `button` entities. A button's press is a one-shot,
+non-retained message — since this device is asleep almost all the time, a
+press could easily land while nobody's subscribed and just vanish.
+Flipping the switch sets a retained flag; the device consumes it on its
+next natural wake and reports back `OFF`, which reads as a momentary
+action in the UI even though the wire protocol underneath is a switch.
+
+### Battery calibration offset
+
+A plain volts-added correction (not a ratio), applied on top of the
+compiled-in `BATT_CAL` curve: work out the offset as (multimeter reading)
+- (Battery Voltage (Raw) sensor) and enter that difference in the
+**"Battery Calibration Offset"** number entity in Home Assistant — e.g.
+0.15 means "the hardware reads 0.15V low, add 0.15V from now on." Same
+persistent (not one-shot) pattern as the other config-style entities here:
+applies on the device's next wake and is echoed back as the new state.
 
 ### Count-mismatch detection
 
@@ -134,9 +196,12 @@ missed), `fail_open` if it's the other way around.
 
 ## Config file
 
-Credentials, static IP, device identity, hardware pins, timing, debounce
-strength, and timezone all live in `config.h` (gitignored) — copy
-`config.h.example` to `config.h` and fill in real values.
+As of v2.0.0, `config.h` (gitignored) only holds the OTA password,
+setup-portal AP password/timeout, hardware pins, battery calibration
+curve, timing, debounce strength, and timezone — copy `config.h.example`
+to `config.h` and fill in real values. WiFi, MQTT credentials, and device
+identity are **not** here anymore; they're set at runtime through the web
+setup portal and persisted in NVS (see **Setup** above).
 
 ## Version History
 
@@ -147,6 +212,14 @@ fleet's `CLAUDE.md` (patch +1 for a small change, minor +1 / patch reset
 for a bigger one) — treat them as indicative for that stretch. From
 v1.3.3 onward this is tracked exactly, one entry per firmware-affecting
 change.
+
+**v2.0.0 is a breaking change for the physical unit.** WiFi/MQTT/device
+identity moved out of `config.h` into the runtime setup portal (ported
+from `temp_humidity_sensor_v4`, adapted for a board with no spare GPIO for
+a physical setup button -- see **Setup** above), so after flashing this
+version the device boots straight into the setup portal and needs to be
+reprovisioned through the web page once; the previously-compiled-in
+credentials are no longer read at all.
 
 | Version | Date | Changes |
 |---|---|---|
@@ -164,3 +237,4 @@ change.
 | v1.3.4 | 2026-09-13 | Count-mismatch diagnostic (`ok`/`fail_open`/`fail_close`) — flags when `open_count_today`/`close_count_today` drift more than 1 apart, which is physically impossible for a door and means a real transition was never counted. |
 | v1.3.5 | 2026-09-13 | Attempted fix for occasional spurious "unavailable": replaced the fixed post-disconnect delay with a poll on `mqttClient.connected()`. Made it worse (see v1.3.6) — reverted. |
 | v1.3.6 | 2026-09-13 | Reverted v1.3.5: `mqttClient.connected()` almost certainly flips false synchronously the instant `disconnect()` is called, before the DISCONNECT packet actually goes out on the library's background task, so polling it exited the wait instantly instead of giving real time. Back to a fixed delay (`MQTT_DISCONNECT_DELAY_MS`), bumped from the original 300ms to 400ms for a little extra margin. |
+| v2.0.0 | 2026-09-18 | Ported `temp_humidity_sensor_v4`'s runtime self-provisioning system: a WiFiManager web setup portal replaces compiled-in WiFi/MQTT/device-identity credentials in `config.h`, with runtime-configurable static IP and BSSID pinning (field-based, not a checkbox -- see **Setup** above for why). Adapted for a board with no spare GPIO for a physical setup button: the portal opens automatically on a never-configured device, and on an already-configured one via a new retained "Setup Mode" MQTT switch; factory reset moved from a button-hold gesture to a new retained "Factory Reset" MQTT switch, acted on immediately rather than requiring a hold duration. Also added the "Battery Calibration Offset" HA number entity and "Battery Voltage (Raw)" diagnostic sensor, same additive-offset mechanism as `temp_humidity_sensor_v4`. Breaking change for the physical unit -- see the migration note above. |
