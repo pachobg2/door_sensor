@@ -146,6 +146,7 @@ portal, default `door_XXXXXX`).
 | Open count today | `home/<id>/open_count_today` | integer, resets at local midnight |
 | Close count today | `home/<id>/close_count_today` | integer, resets at local midnight |
 | Count mismatch | `home/<id>/count_mismatch` | `ok` / `fail_open` / `fail_close` |
+| Reset daily counters | `home/<id>/count_reset/set`, `.../state` | `ON` / `OFF` (retained switch, see below) |
 | WiFi signal | `home/<id>/wifi_signal` | dBm |
 | Availability (LWT) | `home/<id>/status` | `online` / `offline` |
 | Boot count | `home/<id>/boot_count` | integer |
@@ -164,9 +165,10 @@ Home Assistant automatically once MQTT discovery is enabled.
 
 ### Retained-switch controls, not plain buttons
 
-**"OTA Update"**, **"Reset Boot Counter"**, **"Setup Mode"**, and
-**"Factory Reset"** are all implemented as retained MQTT switches rather
-than plain HA `button` entities. A button's press is a one-shot,
+**"OTA Update"**, **"Reset Boot Counter"**, **"Reset Daily Counters"**,
+**"Setup Mode"**, and **"Factory Reset"** are all implemented as retained
+MQTT switches rather than plain HA `button` entities. A button's press is
+a one-shot,
 non-retained message — since this device is asleep almost all the time, a
 press could easily land while nobody's subscribed and just vanish.
 Flipping the switch sets a retained flag; the device consumes it on its
@@ -270,3 +272,4 @@ credentials are no longer read at all.
 | v2.1.0 | 2026-09-19 | Added "Debug Mode" (persistent HA switch): keeps the device fully awake and opens a raw TCP server (`NETWORK_DEBUG_PORT`, default 23) mirroring all existing `Serial` output, for watching reed-switch debounce behavior live once the device is mounted somewhere USB isn't reachable -- see `runDebugSession()`. Every existing `Serial.print`/`println`/`printf` call gets tee'd automatically via a `#define Serial` swap to a small `Print`-derived wrapper class, no per-call-site changes. Auto-expires after `DEBUG_SESSION_TIMEOUT_MS` (default 30 min) so a forgotten toggle can't drain the battery. Prompted by intermittent missed door-close events during fast operation near the edge of the reed switch's magnetic range -- this doesn't fix that on its own, but makes it directly observable. |
 | v2.1.1 | 2026-09-19 | Fixed the actual cause of the missed-close reports above: Debug Mode logging confirmed rapid manual door operation was tracked perfectly while the device stayed awake, but real misses still happened during the normal sleep cycle -- pointing at the one remaining blind `delay(MQTT_DISCONNECT_DELAY_MS)` right before `armWakeup()`/`goToSleep()`, which never called `checkDoorPin()` during that 400ms window. A transition landing there went uncounted entirely and could arm the next wake-up level from stale state. Replaced it with the same delay-then-`checkDoorPin()` loop every other wait in this file already uses, keeping the identical total wall-clock delay (still not a poll on `mqttClient.connected()` -- see that comment's own v1.3.5 history). |
 | v2.1.2 | 2026-09-19 | Added a `DOOR_LINGER_MS` (default 3s) window at the end of every cycle, still connected, before starting the MQTT/WiFi teardown -- an extra margin on top of v2.1.1's fix, added "just in case" after testing came back clean. A follow-up transition landing in this window now gets its own live publish (not just a counted-but-unreported one, like the disconnect-delay window still handles), at the cost of a few extra seconds awake occasionally. |
+| v2.2.0 | 2026-09-19 | Added a "Reset Daily Counters" retained MQTT switch (same momentary-via-echo pattern as Reset Boot Counter) to manually zero `open_count_today`/`close_count_today` -- also clears any `count_mismatch` fault along with them, since a mismatch is only ever a function of those two numbers. |

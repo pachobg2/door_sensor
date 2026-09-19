@@ -308,13 +308,15 @@ String TOPIC_STATE, TOPIC_BATTERY, TOPIC_BATTERY_PCT, TOPIC_BATTERY_V_RAW, TOPIC
        TOPIC_LAST_FULL_CHARGE, TOPIC_SETUP_MODE_CMD, TOPIC_SETUP_MODE_STATE,
        TOPIC_FACTORY_RESET_CMD, TOPIC_FACTORY_RESET_STATE,
        TOPIC_BATTERY_CAL_OFFSET, TOPIC_BATTERY_CAL_OFFSET_SET,
-       TOPIC_DEBUG_MODE_CMD, TOPIC_DEBUG_MODE_STATE;
+       TOPIC_DEBUG_MODE_CMD, TOPIC_DEBUG_MODE_STATE,
+       TOPIC_COUNT_RESET_CMD, TOPIC_COUNT_RESET_STATE;
 String DISCOVERY_DOOR, DISCOVERY_BATTERY, DISCOVERY_BATTERY_PCT, DISCOVERY_BATTERY_V_RAW,
        DISCOVERY_RSSI, DISCOVERY_OTA, DISCOVERY_BATTERY_LOW, DISCOVERY_BOOT_COUNT,
        DISCOVERY_FAIL_COUNT, DISCOVERY_TOTAL_FAIL_COUNT, DISCOVERY_OPEN_COUNT_TODAY,
        DISCOVERY_CLOSE_COUNT_TODAY, DISCOVERY_COUNT_MISMATCH, DISCOVERY_BOOT_RESET,
        DISCOVERY_OTA_ACTIVE, DISCOVERY_LAST_FULL_CHARGE, DISCOVERY_SETUP_MODE,
-       DISCOVERY_FACTORY_RESET, DISCOVERY_BATTERY_CAL_OFFSET, DISCOVERY_DEBUG_MODE;
+       DISCOVERY_FACTORY_RESET, DISCOVERY_BATTERY_CAL_OFFSET, DISCOVERY_DEBUG_MODE,
+       DISCOVERY_COUNT_RESET;
 
 void buildTopics() {
   String base = String("home/") + settings.deviceId;
@@ -345,6 +347,8 @@ void buildTopics() {
   TOPIC_BATTERY_CAL_OFFSET_SET = base + "/battery_cal_offset/set";
   TOPIC_DEBUG_MODE_CMD   = base + "/debug_mode/set";
   TOPIC_DEBUG_MODE_STATE = base + "/debug_mode/state";
+  TOPIC_COUNT_RESET_CMD   = base + "/count_reset/set";
+  TOPIC_COUNT_RESET_STATE = base + "/count_reset/state";
 
   String sbase = String("homeassistant/sensor/") + settings.deviceId;
   DISCOVERY_DOOR    = String("homeassistant/binary_sensor/") + settings.deviceId + "/door/config";
@@ -367,6 +371,7 @@ void buildTopics() {
   DISCOVERY_FACTORY_RESET = String("homeassistant/switch/") + settings.deviceId + "/factory_reset/config";
   DISCOVERY_BATTERY_CAL_OFFSET = String("homeassistant/number/") + settings.deviceId + "/battery_cal_offset/config";
   DISCOVERY_DEBUG_MODE = String("homeassistant/switch/") + settings.deviceId + "/debug_mode/config";
+  DISCOVERY_COUNT_RESET = String("homeassistant/switch/") + settings.deviceId + "/count_reset/config";
 }
 
 // ---------------- Persisted state (survives deep sleep) ----------------
@@ -394,6 +399,7 @@ volatile bool otaRequested = false;
 volatile bool bootCountResetRequested = false;
 volatile bool setupModeRequested = false;
 volatile bool factoryResetRequested = false;
+volatile bool countResetRequested = false;
 
 // Same persistent (not one-shot) pattern as temp_humidity_sensor_v4's LED
 // brightness/battery-offset entities: a plain calibration offset in volts,
@@ -591,6 +597,19 @@ void setup() {
         // every subsequent wake, and reflect the reset back to the HA UI.
         publishQos1(TOPIC_BOOT_RESET_CMD, "OFF", true);
         publishQos1(TOPIC_BOOT_RESET_STATE, "OFF", true);
+      }
+
+      if (countResetRequested) {
+        Serial.println("Daily open/close counters reset requested via MQTT switch.");
+        openCountToday = 0;
+        closeCountToday = 0;
+        publishQos1(TOPIC_OPEN_COUNT_TODAY, String(openCountToday), true);
+        publishQos1(TOPIC_CLOSE_COUNT_TODAY, String(closeCountToday), true);
+        publishQos1(TOPIC_COUNT_MISMATCH, countMismatchState(), true);
+        // Clear the retained command immediately, same as every other
+        // switch here -- see Reset Boot Counter above.
+        publishQos1(TOPIC_COUNT_RESET_CMD, "OFF", true);
+        publishQos1(TOPIC_COUNT_RESET_STATE, "OFF", true);
       }
 
       int failedTopics = publishState(currentDoorOpen, batteryVoltage, batteryPercent, rawVoltage, rssi, connectFailCount);
@@ -874,6 +893,8 @@ void onMqttMessage(const espMqttClientTypes::MessageProperties& properties, cons
     if (isOn) setupModeRequested = true;
   } else if (TOPIC_FACTORY_RESET_CMD.equals(topic)) {
     if (isOn) factoryResetRequested = true;
+  } else if (TOPIC_COUNT_RESET_CMD.equals(topic)) {
+    if (isOn) countResetRequested = true;
   } else if (TOPIC_BATTERY_CAL_OFFSET_SET.equals(topic)) {
     size_t copyLen = len < sizeof(g_battCalCmdPayload) - 1 ? len : sizeof(g_battCalCmdPayload) - 1;
     memcpy(g_battCalCmdPayload, payload, copyLen);
@@ -926,6 +947,7 @@ bool connectMQTT() {
       mqttClient.subscribe(TOPIC_FACTORY_RESET_CMD.c_str(), 1);
       mqttClient.subscribe(TOPIC_BATTERY_CAL_OFFSET_SET.c_str(), 1);
       mqttClient.subscribe(TOPIC_DEBUG_MODE_CMD.c_str(), 1);
+      mqttClient.subscribe(TOPIC_COUNT_RESET_CMD.c_str(), 1);
       unsigned long subStart = millis();
       while (millis() - subStart < OTA_SUBSCRIBE_WAIT_MS) {
         delay(20);
@@ -1262,6 +1284,27 @@ void sendDiscoveryConfig() {
     + "\"device\":{\"identifiers\":[\"" + settings.deviceId + "\"]}"
     + "}";
   publishQos1(DISCOVERY_BOOT_RESET, bootResetPayload, true);
+
+  // Reset-daily-counters control. Same momentary-via-echo retained-switch
+  // trick as Reset Boot Counter above -- zeroes open_count_today and
+  // close_count_today (and clears any count_mismatch fault along with
+  // them, since a mismatch is only ever a function of those two numbers)
+  // for a manual correction after, e.g., testing/debugging the sensor by
+  // hand and not wanting today's numbers to reflect that.
+  String countResetPayload = String("{")
+    + "\"name\":\"" + settings.deviceName + " Reset Daily Counters\","
+    + "\"unique_id\":\"" + settings.deviceId + "_count_reset\","
+    + "\"command_topic\":\"" + TOPIC_COUNT_RESET_CMD + "\","
+    + "\"state_topic\":\"" + TOPIC_COUNT_RESET_STATE + "\","
+    + "\"payload_on\":\"ON\","
+    + "\"payload_off\":\"OFF\","
+    + "\"retain\":true,"
+    + "\"icon\":\"mdi:counter\","
+    + "\"entity_category\":\"config\","
+    + "\"availability_topic\":\"" + TOPIC_AVAILABILITY + "\","
+    + "\"device\":{\"identifiers\":[\"" + settings.deviceId + "\"]}"
+    + "}";
+  publishQos1(DISCOVERY_COUNT_RESET, countResetPayload, true);
 
   // OTA-active indicator. This device has no status LED (unlike the other
   // battery sensors in this fleet) to show OTA is in progress, so this is
