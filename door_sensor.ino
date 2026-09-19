@@ -697,18 +697,28 @@ void setup() {
     return;
   }
 
-  // Final check right before tearing down the connection -- closes the
-  // residual gap between the last poll during publishing and now, plus
-  // catches any transition that checkDoorPin() saw (and counted) during
-  // publishState()'s own publish calls but couldn't publish itself (see
-  // checkDoorPin()'s comment on why). This call site is safe: nothing else
-  // is waiting on a PUBACK right now, so publishing here can't race it.
-  checkDoorPin();
-  if (mqttClient.connected() && currentDoorOpen != lastReportedDoorOpen) {
-    Serial.printf("[door] publishing corrected final state before sleep: %s\n",
-                  currentDoorOpen ? "OPEN" : "CLOSED");
-    publishQos1(TOPIC_STATE, currentDoorOpen ? "OPEN" : "CLOSED", true);
-    lastReportedDoorOpen = currentDoorOpen;
+  // Linger a few extra seconds here, still connected, before tearing
+  // anything down -- not just one last check, but a whole DOOR_LINGER_MS
+  // window of it. Closes the residual gap between the last poll during
+  // publishing and now, catches any transition that checkDoorPin() saw
+  // (and counted) during publishState()'s own publish calls but couldn't
+  // publish itself (see checkDoorPin()'s comment on why), and -- being a
+  // window rather than an instant -- also catches a follow-up flip that
+  // happens shortly after the main publish, while MQTT is still up to
+  // actually report it live rather than just silently updating the
+  // counters. Cheap in battery terms: a few extra seconds occasionally,
+  // not continuous wake. This call site is safe to publish from: nothing
+  // else is waiting on a PUBACK right now, so publishing here can't race it.
+  unsigned long lingerStart = millis();
+  while (millis() - lingerStart < DOOR_LINGER_MS) {
+    checkDoorPin();
+    if (mqttClient.connected() && currentDoorOpen != lastReportedDoorOpen) {
+      Serial.printf("[door] publishing follow-up state during linger: %s\n",
+                    currentDoorOpen ? "OPEN" : "CLOSED");
+      publishQos1(TOPIC_STATE, currentDoorOpen ? "OPEN" : "CLOSED", true);
+      lastReportedDoorOpen = currentDoorOpen;
+    }
+    delay(20);
   }
 
   // Clean (non-forced) disconnect: the library sends any remaining queued

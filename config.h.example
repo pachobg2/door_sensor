@@ -87,6 +87,14 @@ const uint32_t MQTT_PUBLISH_ATTEMPTS   = 3;
 // NOT a poll on mqttClient.connected() -- that flag isn't a reliable
 // "has it actually sent yet" signal, so don't try to shortcut this wait.
 const uint32_t MQTT_DISCONNECT_DELAY_MS = 400;
+// How long to linger, still connected and polling the reed switch, after
+// the main work of a cycle is done and before starting the MQTT/WiFi
+// teardown -- catches a follow-up transition that happens shortly after
+// the main publish while there's still a live connection to report it on,
+// rather than only picking it up (uncounted-as-its-own-event) via the
+// disconnect-delay polling below or the next wake entirely. A few extra
+// seconds occasionally, not continuous wake -- cheap in battery terms.
+const uint32_t DOOR_LINGER_MS = 3000; // 3s
 const uint32_t DEBOUNCE_SETTLE_MS      = 50;
 // A candidate door-state transition must hold for this many consecutive
 // samples (each DEBOUNCE_SETTLE_MS apart) before it's trusted -- rejects
