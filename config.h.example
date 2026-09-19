@@ -28,6 +28,17 @@ const char* AP_PASSWORD = "setup1234";
 const uint32_t PORTAL_TIMEOUT_SEC = 600; // 10 min
 
 // ------------------------------------------------------------------
+// Network debug session (Debug Mode -- see runDebugSession() in the .ino)
+// ------------------------------------------------------------------
+// Raw TCP port for the network serial monitor -- 23 is the real telnet
+// port, so `telnet <ip>` works with no port argument.
+const uint16_t NETWORK_DEBUG_PORT = 23;
+// Debug Mode keeps the device fully awake (no deep sleep) the whole time
+// it's on, so this bounds how long a forgotten HA toggle can drain the
+// battery before the device auto-reverts to normal operation on its own.
+const uint32_t DEBUG_SESSION_TIMEOUT_MS = 30UL * 60 * 1000UL; // 30 min
+
+// ------------------------------------------------------------------
 // Device identity (firmware facts, not user settings -- device ID/name are
 // configured at runtime via the setup portal instead)
 // ------------------------------------------------------------------

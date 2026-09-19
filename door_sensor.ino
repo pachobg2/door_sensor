@@ -79,6 +79,16 @@
  *     Will -- deliberately not a poll on mqttClient.connected(), which
  *     isn't a reliable signal for whether the disconnect packet actually
  *     went out yet
+ *   - "Debug Mode" (an HA switch, persistent not one-shot) keeps the
+ *     device fully awake and opens a raw TCP server (NETWORK_DEBUG_PORT,
+ *     default 23 -- plain `telnet <ip>` works) mirroring everything
+ *     normally printed over USB Serial, for watching reed-switch debounce
+ *     behavior live once this device is mounted somewhere USB isn't
+ *     reachable -- see runDebugSession(). Auto-expires after
+ *     DEBUG_SESSION_TIMEOUT_MS (default 30 min) so a forgotten toggle
+ *     can't drain the battery indefinitely. Not the same thing as the
+ *     DEBUG_MODE compile-time constant in config.h (a bench-testing
+ *     convenience, unrelated to this).
  *
  * Libraries required (Library Manager):
  *   - espMqttClient (Bert Melis)
@@ -107,6 +117,44 @@
 // (see runMaintenanceMode()) and persisted in NVS, same system as
 // temp_humidity_sensor_v4.
 #include "config.h"
+
+// ---------------- Network debug session (Debug Mode) ----------------
+// Lets "Debug Mode" (an HA switch, see settings.debugMode below) be
+// watched live over the network instead of USB Serial, which isn't
+// reachable once this device is mounted on the door. Every existing
+// Serial.print/println/printf call in this file (they all funnel through
+// Print::write() under the hood) gets mirrored to whatever TCP client is
+// currently connected, with zero changes at each of the ~100 existing call
+// sites -- the #define below routes the bare name "Serial" to a small tee
+// object for the rest of this translation unit. Scoped to this .ino only;
+// the ESP32 core's own internals in other .cpp files are unaffected.
+//
+// NOT the same thing as the DEBUG_MODE compile-time constant in config.h
+// (a bench-testing convenience: skips deep sleep entirely, adds a boot
+// delay for USB Serial Monitor to attach). This is the runtime,
+// HA-toggleable, network-reachable one -- see runDebugSession().
+HardwareSerial& RealSerial = Serial; // captured before the macro below shadows "Serial"
+
+WiFiServer debugServer(NETWORK_DEBUG_PORT);
+WiFiClient debugClient;
+
+class TeeSerial : public Print {
+public:
+  void begin(unsigned long baud) { RealSerial.begin(baud); }
+  void flush() { RealSerial.flush(); }
+  size_t write(uint8_t c) override {
+    RealSerial.write(c);
+    if (debugClient && debugClient.connected()) debugClient.write(c);
+    return 1;
+  }
+  size_t write(const uint8_t* buf, size_t len) override {
+    RealSerial.write(buf, len);
+    if (debugClient && debugClient.connected()) debugClient.write(buf, len);
+    return len;
+  }
+};
+TeeSerial dbgSerial;
+#define Serial dbgSerial
 
 // ---------------- Runtime settings (WiFi/MQTT/identity, via the setup portal) ----------------
 // Same system as temp_humidity_sensor_v4: nothing here is compiled in --
@@ -144,6 +192,13 @@ struct Settings {
   // AP answers the SSID, for mesh/repeater setups with more than one AP
   // sharing the same network name. Empty = no pinning.
   String bssid;
+
+  // HA-toggleable "Debug Mode" -- see runDebugSession(). Persistent (not a
+  // one-shot trigger like OTA/Setup Mode/Factory Reset): stays true across
+  // reboots until explicitly toggled off or it auto-expires after
+  // DEBUG_SESSION_TIMEOUT_MS, at which point it's saved back to false so a
+  // forgotten switch doesn't re-enter the session on every future wake.
+  bool debugMode = false;
 };
 Settings settings;
 Preferences settingsPrefs;
@@ -174,6 +229,7 @@ void loadSettings() {
   settings.subnet      = settingsPrefs.getString("subnet", "255.255.255.0");
   settings.dns         = settingsPrefs.getString("dns", "");
   settings.bssid       = settingsPrefs.getString("bssid", "");
+  settings.debugMode   = settingsPrefs.getBool("debugMode", false);
   settingsPrefs.end();
 }
 
@@ -195,6 +251,7 @@ void saveSettings() {
   settingsPrefs.putString("subnet", settings.subnet);
   settingsPrefs.putString("dns", settings.dns);
   settingsPrefs.putString("bssid", settings.bssid);
+  settingsPrefs.putBool("debugMode", settings.debugMode);
   settingsPrefs.end();
 }
 
@@ -250,13 +307,14 @@ String TOPIC_STATE, TOPIC_BATTERY, TOPIC_BATTERY_PCT, TOPIC_BATTERY_V_RAW, TOPIC
        TOPIC_BOOT_RESET_CMD, TOPIC_BOOT_RESET_STATE, TOPIC_OTA_ACTIVE,
        TOPIC_LAST_FULL_CHARGE, TOPIC_SETUP_MODE_CMD, TOPIC_SETUP_MODE_STATE,
        TOPIC_FACTORY_RESET_CMD, TOPIC_FACTORY_RESET_STATE,
-       TOPIC_BATTERY_CAL_OFFSET, TOPIC_BATTERY_CAL_OFFSET_SET;
+       TOPIC_BATTERY_CAL_OFFSET, TOPIC_BATTERY_CAL_OFFSET_SET,
+       TOPIC_DEBUG_MODE_CMD, TOPIC_DEBUG_MODE_STATE;
 String DISCOVERY_DOOR, DISCOVERY_BATTERY, DISCOVERY_BATTERY_PCT, DISCOVERY_BATTERY_V_RAW,
        DISCOVERY_RSSI, DISCOVERY_OTA, DISCOVERY_BATTERY_LOW, DISCOVERY_BOOT_COUNT,
        DISCOVERY_FAIL_COUNT, DISCOVERY_TOTAL_FAIL_COUNT, DISCOVERY_OPEN_COUNT_TODAY,
        DISCOVERY_CLOSE_COUNT_TODAY, DISCOVERY_COUNT_MISMATCH, DISCOVERY_BOOT_RESET,
        DISCOVERY_OTA_ACTIVE, DISCOVERY_LAST_FULL_CHARGE, DISCOVERY_SETUP_MODE,
-       DISCOVERY_FACTORY_RESET, DISCOVERY_BATTERY_CAL_OFFSET;
+       DISCOVERY_FACTORY_RESET, DISCOVERY_BATTERY_CAL_OFFSET, DISCOVERY_DEBUG_MODE;
 
 void buildTopics() {
   String base = String("home/") + settings.deviceId;
@@ -285,6 +343,8 @@ void buildTopics() {
   TOPIC_FACTORY_RESET_STATE = base + "/factory_reset/state";
   TOPIC_BATTERY_CAL_OFFSET     = base + "/battery_cal_offset";
   TOPIC_BATTERY_CAL_OFFSET_SET = base + "/battery_cal_offset/set";
+  TOPIC_DEBUG_MODE_CMD   = base + "/debug_mode/set";
+  TOPIC_DEBUG_MODE_STATE = base + "/debug_mode/state";
 
   String sbase = String("homeassistant/sensor/") + settings.deviceId;
   DISCOVERY_DOOR    = String("homeassistant/binary_sensor/") + settings.deviceId + "/door/config";
@@ -306,6 +366,7 @@ void buildTopics() {
   DISCOVERY_SETUP_MODE    = String("homeassistant/switch/") + settings.deviceId + "/setup_mode/config";
   DISCOVERY_FACTORY_RESET = String("homeassistant/switch/") + settings.deviceId + "/factory_reset/config";
   DISCOVERY_BATTERY_CAL_OFFSET = String("homeassistant/number/") + settings.deviceId + "/battery_cal_offset/config";
+  DISCOVERY_DEBUG_MODE = String("homeassistant/switch/") + settings.deviceId + "/debug_mode/config";
 }
 
 // ---------------- Persisted state (survives deep sleep) ----------------
@@ -339,6 +400,14 @@ volatile bool factoryResetRequested = false;
 // applied on the device's next wake and echoed back as the new state.
 volatile bool g_battCalCmdReceived = false;
 char g_battCalCmdPayload[12] = {0};
+
+// Same persistent pattern as battery calibration above -- a plain ON/OFF
+// toggle rather than a one-shot trigger. Checked again live inside
+// runDebugSession()'s own loop (the library's background task keeps
+// delivering messages throughout the session, not just at connect), so a
+// mid-session toggle-off is picked up without re-subscribing.
+volatile bool g_debugModeCmdReceived = false;
+char g_debugModeCmdPayload[8] = {0};
 
 // Latest known door state for this wake cycle. Seeded from the initial read
 // in setup(), then kept fresh by checkDoorPin() polling throughout the WiFi
@@ -410,6 +479,7 @@ void onMqttMessage(const espMqttClientTypes::MessageProperties& properties, cons
                     const uint8_t* payload, size_t len, size_t index, size_t total);
 void runOtaWindow();
 void runMaintenanceMode(bool viaMqttRequest);
+void runDebugSession();
 
 // ---------------- Setup / main flow ----------------
 
@@ -588,6 +658,26 @@ void setup() {
         // Only reached if the portal timed out -- falls through to the
         // normal end-of-cycle sleep below with whatever settings it had.
       }
+
+      // Debug Mode: a plain ON/OFF toggle, same persistent pattern as the
+      // battery calibration offset above -- apply if changed, then always
+      // echo the actual current value back (not a one-shot trigger, so
+      // no "clear the retained command" step like OTA/Setup Mode/Factory
+      // Reset above).
+      if (g_debugModeCmdReceived) {
+        bool requested = (strcmp(g_debugModeCmdPayload, "ON") == 0);
+        if (requested != settings.debugMode) {
+          settings.debugMode = requested;
+          saveSettings();
+          Serial.printf("Debug Mode set to %s via HA.\n", settings.debugMode ? "ON" : "OFF");
+        }
+      }
+      publishQos1(TOPIC_DEBUG_MODE_STATE, settings.debugMode ? "ON" : "OFF", true);
+      if (settings.debugMode) {
+        runDebugSession();
+        // Always returns (auto-expiry or a live toggle-off) and falls
+        // through to the normal end-of-cycle teardown below.
+      }
     } else {
       Serial.println("MQTT connect failed after all attempts, skipping publish this cycle.");
       connectFailCount++;
@@ -763,6 +853,11 @@ void onMqttMessage(const espMqttClientTypes::MessageProperties& properties, cons
     memcpy(g_battCalCmdPayload, payload, copyLen);
     g_battCalCmdPayload[copyLen] = '\0';
     g_battCalCmdReceived = true;
+  } else if (TOPIC_DEBUG_MODE_CMD.equals(topic)) {
+    size_t copyLen = len < sizeof(g_debugModeCmdPayload) - 1 ? len : sizeof(g_debugModeCmdPayload) - 1;
+    memcpy(g_debugModeCmdPayload, payload, copyLen);
+    g_debugModeCmdPayload[copyLen] = '\0';
+    g_debugModeCmdReceived = true;
   }
 }
 
@@ -804,6 +899,7 @@ bool connectMQTT() {
       mqttClient.subscribe(TOPIC_SETUP_MODE_CMD.c_str(), 1);
       mqttClient.subscribe(TOPIC_FACTORY_RESET_CMD.c_str(), 1);
       mqttClient.subscribe(TOPIC_BATTERY_CAL_OFFSET_SET.c_str(), 1);
+      mqttClient.subscribe(TOPIC_DEBUG_MODE_CMD.c_str(), 1);
       unsigned long subStart = millis();
       while (millis() - subStart < OTA_SUBSCRIBE_WAIT_MS) {
         delay(20);
@@ -943,6 +1039,29 @@ void sendDiscoveryConfig() {
     + "\"device\":{\"identifiers\":[\"" + settings.deviceId + "\"]}"
     + "}";
   publishQos1(DISCOVERY_BATTERY_CAL_OFFSET, battCalPayload, true);
+
+  // Debug Mode: keeps the device awake (no deep sleep) and opens a raw TCP
+  // server (NETWORK_DEBUG_PORT, see runDebugSession()) mirroring everything
+  // normally printed over USB Serial, for watching door-pin debounce
+  // behavior live once this device is mounted somewhere USB isn't
+  // reachable. Persistent, not a one-shot trigger -- reflects the actual
+  // current state, including after it auto-expires
+  // (DEBUG_SESSION_TIMEOUT_MS) on its own.
+  String debugModePayload = String("{")
+    + "\"name\":\"" + settings.deviceName + " Debug Mode\","
+    + "\"unique_id\":\"" + settings.deviceId + "_debug_mode\","
+    + "\"command_topic\":\"" + TOPIC_DEBUG_MODE_CMD + "\","
+    + "\"state_topic\":\"" + TOPIC_DEBUG_MODE_STATE + "\","
+    + "\"payload_on\":\"ON\","
+    + "\"payload_off\":\"OFF\","
+    + "\"optimistic\":false,"
+    + "\"retain\":true,"
+    + "\"icon\":\"mdi:bug\","
+    + "\"entity_category\":\"config\","
+    + "\"availability_topic\":\"" + TOPIC_AVAILABILITY + "\","
+    + "\"device\":{\"identifiers\":[\"" + settings.deviceId + "\"]}"
+    + "}";
+  publishQos1(DISCOVERY_DEBUG_MODE, debugModePayload, true);
 
   // Low-battery binary sensor discovery payload
   String battLowPayload = String("{")
@@ -1791,6 +1910,65 @@ void runOtaWindow() {
     delay(10);
     checkDoorPin();
   }
+}
+
+// ---------------- Network debug session ----------------
+
+// Entered from the connected cycle in setup() when settings.debugMode is
+// true (see the apply-if-changed-then-echo block there). Keeps the device
+// fully awake -- no deep sleep -- for up to DEBUG_SESSION_TIMEOUT_MS,
+// polling the reed switch tightly and publishing/logging every transition
+// immediately, so door-pin debounce behavior (see checkDoorPin() /
+// readStableDoorOpen()) can be watched live over a plain TCP connection
+// instead of USB Serial, which isn't reachable once this device is
+// mounted on the door.
+//
+// Deliberately does NOT attempt an MQTT reconnect if the connection drops
+// mid-session (a 30-minute continuously-awake window is long enough that
+// a WiFi hiccup is plausible) -- the local telnet feed keeps working
+// either way, just without live HA updates until the next normal wake.
+// Also doesn't start ArduinoOTA here; use the existing OTA Request switch
+// on a separate wake if firmware needs pushing.
+void runDebugSession() {
+  startAwakeWatchdog(DEBUG_SESSION_TIMEOUT_MS + 30000); // extend to cover the whole session, plus margin
+  debugServer.begin();
+  Serial.printf("[debug] Debug Mode active -- connect with: telnet %s\n", WiFi.localIP().toString().c_str());
+  Serial.println("[debug] Auto-expires in ~30 min, or flip the Debug Mode switch off.");
+
+  unsigned long sessionStart = millis();
+  while (millis() - sessionStart < DEBUG_SESSION_TIMEOUT_MS) {
+    if (debugServer.hasClient()) {
+      if (debugClient.connected()) debugClient.stop();
+      debugClient = debugServer.available(); // .available() here returns the pending client, not a byte count -- WiFiServer's own override, not Stream's
+      Serial.println("[debug] Network client connected.");
+    }
+
+    bool before = currentDoorOpen;
+    uint32_t openBefore = openCountToday, closeBefore = closeCountToday;
+    checkDoorPin(); // same debounce/logging as the normal cycle -- this is the actual thing being watched
+    if (currentDoorOpen != before) {
+      publishQos1(TOPIC_STATE, currentDoorOpen ? "OPEN" : "CLOSED", true);
+      if (openCountToday != openBefore) publishQos1(TOPIC_OPEN_COUNT_TODAY, String(openCountToday), true);
+      if (closeCountToday != closeBefore) publishQos1(TOPIC_CLOSE_COUNT_TODAY, String(closeCountToday), true);
+      publishQos1(TOPIC_COUNT_MISMATCH, countMismatchState(), true);
+    }
+
+    // Re-check for a live toggle-off mid-session -- onMqttMessage() fires
+    // from the library's own background task regardless of what this loop
+    // is doing, so this picks up a fresh command without re-subscribing.
+    if (g_debugModeCmdReceived && strcmp(g_debugModeCmdPayload, "OFF") == 0) {
+      Serial.println("[debug] Debug Mode switched off via MQTT -- ending session early.");
+      break;
+    }
+    delay(20);
+  }
+
+  settings.debugMode = false;
+  saveSettings();
+  publishQos1(TOPIC_DEBUG_MODE_STATE, "OFF", true);
+  if (debugClient) debugClient.stop();
+  debugServer.end();
+  Serial.println("[debug] Debug session ended -- resuming normal sleep cycle.");
 }
 
 // ---------------- Sleep ----------------

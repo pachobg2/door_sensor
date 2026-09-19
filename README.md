@@ -156,6 +156,7 @@ portal, default `door_XXXXXX`).
 | OTA in progress | `home/<id>/ota_active` | `ON` / `OFF` |
 | Setup Mode | `home/<id>/setup_mode/set`, `.../state` | `ON` / `OFF` (retained switch -- reopens the setup portal, see above) |
 | Factory Reset | `home/<id>/factory_reset/set`, `.../state` | `ON` / `OFF` (retained switch -- wipes settings, see above) |
+| Debug Mode | `home/<id>/debug_mode/set`, `.../state` | `ON` / `OFF` (persistent switch -- keeps the device awake + opens a network serial monitor, see below) |
 
 All published via retained HA discovery configs on
 `homeassistant/<component>/<device_id>/.../config`, so entities show up in
@@ -193,6 +194,34 @@ counted somewhere (a missed wake, a debounce that gave up and fell back
 to the wrong reading, etc.), and `count_mismatch` reports which direction:
 `fail_close` if opens are outpacing closes (closes are the ones being
 missed), `fail_open` if it's the other way around.
+
+### Debug Mode — network serial monitor
+
+Once this device is mounted on a door, USB Serial isn't reachable to watch
+its debounce behavior live. Flip the retained **"Debug Mode"** switch in
+Home Assistant and, on the device's next wake, it:
+
+- Keeps itself fully awake (no deep sleep) instead of ending the cycle
+  normally.
+- Opens a raw TCP server on `NETWORK_DEBUG_PORT` (default `23`, the actual
+  telnet port) that mirrors everything normally printed over USB Serial —
+  connect with plain `telnet <device-ip>`, no client software needed.
+- Polls the reed switch tightly and publishes/logs every transition
+  immediately, so you can stand at the door, operate it, and watch
+  `[door] mid-cycle transition detected...` / `[door] pin never settled
+  during debounce -- using last sample.` in real time instead of guessing
+  from the eventual HA state.
+
+Unlike the momentary switches above, **Debug Mode is persistent** — it
+reflects the device's actual current state at all times, not a
+consume-and-reset trigger. It auto-expires after `DEBUG_SESSION_TIMEOUT_MS`
+(default 30 min) regardless of whether you remember to flip the HA switch
+back, since the device can't sleep while it's on and this is a
+battery-powered board. Two things it deliberately does *not* do during a
+session: reconnect MQTT if the connection drops (the telnet feed keeps
+working either way, just without live HA updates until the next normal
+wake), or start `ArduinoOTA` (use the existing "OTA Request" switch on a
+separate wake if you need to push firmware).
 
 ## Config file
 
@@ -238,3 +267,4 @@ credentials are no longer read at all.
 | v1.3.5 | 2026-09-13 | Attempted fix for occasional spurious "unavailable": replaced the fixed post-disconnect delay with a poll on `mqttClient.connected()`. Made it worse (see v1.3.6) — reverted. |
 | v1.3.6 | 2026-09-13 | Reverted v1.3.5: `mqttClient.connected()` almost certainly flips false synchronously the instant `disconnect()` is called, before the DISCONNECT packet actually goes out on the library's background task, so polling it exited the wait instantly instead of giving real time. Back to a fixed delay (`MQTT_DISCONNECT_DELAY_MS`), bumped from the original 300ms to 400ms for a little extra margin. |
 | v2.0.0 | 2026-09-18 | Ported `temp_humidity_sensor_v4`'s runtime self-provisioning system: a WiFiManager web setup portal replaces compiled-in WiFi/MQTT/device-identity credentials in `config.h`, with runtime-configurable static IP and BSSID pinning (field-based, not a checkbox -- see **Setup** above for why). Adapted for a board with no spare GPIO for a physical setup button: the portal opens automatically on a never-configured device, and on an already-configured one via a new retained "Setup Mode" MQTT switch; factory reset moved from a button-hold gesture to a new retained "Factory Reset" MQTT switch, acted on immediately rather than requiring a hold duration. Also added the "Battery Calibration Offset" HA number entity and "Battery Voltage (Raw)" diagnostic sensor, same additive-offset mechanism as `temp_humidity_sensor_v4`. Breaking change for the physical unit -- see the migration note above. |
+| v2.1.0 | 2026-09-19 | Added "Debug Mode" (persistent HA switch): keeps the device fully awake and opens a raw TCP server (`NETWORK_DEBUG_PORT`, default 23) mirroring all existing `Serial` output, for watching reed-switch debounce behavior live once the device is mounted somewhere USB isn't reachable -- see `runDebugSession()`. Every existing `Serial.print`/`println`/`printf` call gets tee'd automatically via a `#define Serial` swap to a small `Print`-derived wrapper class, no per-call-site changes. Auto-expires after `DEBUG_SESSION_TIMEOUT_MS` (default 30 min) so a forgotten toggle can't drain the battery. Prompted by intermittent missed door-close events during fast operation near the edge of the reed switch's magnetic range -- this doesn't fix that on its own, but makes it directly observable. |
