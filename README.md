@@ -5,8 +5,8 @@ discovery). Wakes on a door open/close, plus a periodic heartbeat, reports
 state and battery, then goes back to deep sleep. WiFi/MQTT/device identity
 are configured at runtime via a built-in web setup portal (as of v2.0.0),
 software-triggered OTA/setup/factory-reset (no spare GPIO for a physical
-button), daily open/close counters, and a last-full-charge date to track
-battery life — see **Behavior** below.
+button), and a last-full-charge date to track battery life — see
+**Behavior** below.
 
 ## Files
 
@@ -51,10 +51,6 @@ battery life — see **Behavior** below.
   long (a hang, a stuck library call), independent of everything else in
   the sketch — re-armed with a longer deadline while an OTA window is
   actually in progress.
-- Tracks open/close counts for the current local day, reset to 0 in
-  firmware the first wake after local midnight — needs an occasional NTP
-  sync (`syncLocalTimeIfDue()`), since this device has no RTC backup
-  battery of its own.
 - Records the date of the last time the battery read 100% in flash/NVS
   (not RTC memory, so it survives an actual battery depletion, not just
   deep sleep) — compare this to whenever the device eventually goes quiet
@@ -143,10 +139,6 @@ portal, default `door_XXXXXX`).
 | Low-battery flag | `home/<id>/battery_low` | `ON` / `OFF` |
 | Battery calibration offset | `home/<id>/battery_cal_offset`, `.../set` | volts, -1 to 1 (persistent number entity, see below) |
 | Last full charge date | `home/<id>/last_full_charge` | `YYYY-MM-DD` |
-| Open count today | `home/<id>/open_count_today` | integer, resets at local midnight |
-| Close count today | `home/<id>/close_count_today` | integer, resets at local midnight |
-| Count mismatch | `home/<id>/count_mismatch` | `ok` / `fail_open` / `fail_close` |
-| Reset daily counters | `home/<id>/count_reset/set`, `.../state` | `ON` / `OFF` (retained switch, see below) |
 | WiFi signal | `home/<id>/wifi_signal` | dBm |
 | Availability (LWT) | `home/<id>/status` | `online` / `offline` |
 | Boot count | `home/<id>/boot_count` | integer |
@@ -165,8 +157,8 @@ Home Assistant automatically once MQTT discovery is enabled.
 
 ### Retained-switch controls, not plain buttons
 
-**"OTA Update"**, **"Reset Boot Counter"**, **"Reset Daily Counters"**,
-**"Setup Mode"**, and **"Factory Reset"** are all implemented as retained
+**"OTA Update"**, **"Reset Boot Counter"**, **"Setup Mode"**, and
+**"Factory Reset"** are all implemented as retained
 MQTT switches rather than plain HA `button` entities. A button's press is
 a one-shot,
 non-retained message — since this device is asleep almost all the time, a
@@ -184,18 +176,6 @@ compiled-in `BATT_CAL` curve: work out the offset as (multimeter reading)
 0.15 means "the hardware reads 0.15V low, add 0.15V from now on." Same
 persistent (not one-shot) pattern as the other config-style entities here:
 applies on the device's next wake and is echoed back as the new state.
-
-### Count-mismatch detection
-
-A door can only open and close one at a time, so `open_count_today` and
-`close_count_today` can only ever be equal or differ by exactly 1 — which
-side is "ahead" depends on whatever state the door was already in when the
-counters last reset, but the gap between them never exceeds 1 for a
-physically real door. If it ever does, a real transition was never
-counted somewhere (a missed wake, a debounce that gave up and fell back
-to the wrong reading, etc.), and `count_mismatch` reports which direction:
-`fail_close` if opens are outpacing closes (closes are the ones being
-missed), `fail_open` if it's the other way around.
 
 ### Debug Mode — network serial monitor
 
@@ -273,3 +253,4 @@ credentials are no longer read at all.
 | v2.1.1 | 2026-09-19 | Fixed the actual cause of the missed-close reports above: Debug Mode logging confirmed rapid manual door operation was tracked perfectly while the device stayed awake, but real misses still happened during the normal sleep cycle -- pointing at the one remaining blind `delay(MQTT_DISCONNECT_DELAY_MS)` right before `armWakeup()`/`goToSleep()`, which never called `checkDoorPin()` during that 400ms window. A transition landing there went uncounted entirely and could arm the next wake-up level from stale state. Replaced it with the same delay-then-`checkDoorPin()` loop every other wait in this file already uses, keeping the identical total wall-clock delay (still not a poll on `mqttClient.connected()` -- see that comment's own v1.3.5 history). |
 | v2.1.2 | 2026-09-19 | Added a `DOOR_LINGER_MS` (default 3s) window at the end of every cycle, still connected, before starting the MQTT/WiFi teardown -- an extra margin on top of v2.1.1's fix, added "just in case" after testing came back clean. A follow-up transition landing in this window now gets its own live publish (not just a counted-but-unreported one, like the disconnect-delay window still handles), at the cost of a few extra seconds awake occasionally. |
 | v2.2.0 | 2026-09-19 | Added a "Reset Daily Counters" retained MQTT switch (same momentary-via-echo pattern as Reset Boot Counter) to manually zero `open_count_today`/`close_count_today` -- also clears any `count_mismatch` fault along with them, since a mismatch is only ever a function of those two numbers. |
+| **v2.3.0** | 2026-09-19 | **Removed `open_count_today`/`close_count_today`/`count_mismatch` and the "Reset Daily Counters" switch entirely.** Diagnostics-only feature, not the core function (door state) -- decided during unrelated troubleshooting on the `DS_1_v3` light-sleep fork not to keep carrying this weight when door state is what actually matters. Removed: the two RTC_DATA_ATTR counters and `lastCounterDay`, `countResetRequested`, `updateDailyCounters()`, `countMismatchState()`, all their MQTT topics/HA discovery entries/subscriptions, and the tallying in `checkDoorPin()` and `runDebugSession()`. `config.h`'s NTP section comment updated to reflect its one remaining purpose (the last-full-charge date). |

@@ -49,10 +49,6 @@
  *     else in the sketch
  *   - HA discovery configs carry an expire_after so a dead device eventually
  *     shows "unavailable" instead of a door state frozen forever
- *   - Tracks open/close counts for the current local day, reset to 0 in
- *     firmware the first wake after local midnight (needs an occasional NTP
- *     sync -- see syncLocalTimeIfDue() -- since this device has no RTC
- *     backup battery of its own)
  *   - Boot counter can be reset remotely via a retained MQTT switch (a
  *     plain "button" entity's press is a one-shot, non-retained message a
  *     sleeping device would simply miss)
@@ -69,10 +65,6 @@
  *     not RTC memory, so it survives an actual battery depletion, not just
  *     deep sleep) -- lets you tell how long a charge actually lasted by
  *     comparing this date to whenever the device later goes quiet
- *   - Flags a count-mismatch fault ("fail_open"/"fail_close") if
- *     open_count_today and close_count_today ever drift more than 1 apart --
- *     physically impossible for a door, so it means a real transition was
- *     never counted somewhere -- see countMismatchState()
  *   - Gives the clean MQTT disconnect a fixed real-time delay
  *     (MQTT_DISCONNECT_DELAY_MS) before tearing down WiFi and sleeping, so
  *     the broker is less likely to see an abrupt drop and fire the Last
@@ -303,20 +295,16 @@ bool parseBssid(const String& str, uint8_t out[6]) {
 String TOPIC_STATE, TOPIC_BATTERY, TOPIC_BATTERY_PCT, TOPIC_BATTERY_V_RAW, TOPIC_RSSI,
        TOPIC_AVAILABILITY, TOPIC_OTA_CMD, TOPIC_OTA_STATE, TOPIC_BATTERY_LOW,
        TOPIC_BOOT_COUNT, TOPIC_FAIL_COUNT, TOPIC_TOTAL_FAIL_COUNT,
-       TOPIC_OPEN_COUNT_TODAY, TOPIC_CLOSE_COUNT_TODAY, TOPIC_COUNT_MISMATCH,
        TOPIC_BOOT_RESET_CMD, TOPIC_BOOT_RESET_STATE, TOPIC_OTA_ACTIVE,
        TOPIC_LAST_FULL_CHARGE, TOPIC_SETUP_MODE_CMD, TOPIC_SETUP_MODE_STATE,
        TOPIC_FACTORY_RESET_CMD, TOPIC_FACTORY_RESET_STATE,
        TOPIC_BATTERY_CAL_OFFSET, TOPIC_BATTERY_CAL_OFFSET_SET,
-       TOPIC_DEBUG_MODE_CMD, TOPIC_DEBUG_MODE_STATE,
-       TOPIC_COUNT_RESET_CMD, TOPIC_COUNT_RESET_STATE;
+       TOPIC_DEBUG_MODE_CMD, TOPIC_DEBUG_MODE_STATE;
 String DISCOVERY_DOOR, DISCOVERY_BATTERY, DISCOVERY_BATTERY_PCT, DISCOVERY_BATTERY_V_RAW,
        DISCOVERY_RSSI, DISCOVERY_OTA, DISCOVERY_BATTERY_LOW, DISCOVERY_BOOT_COUNT,
-       DISCOVERY_FAIL_COUNT, DISCOVERY_TOTAL_FAIL_COUNT, DISCOVERY_OPEN_COUNT_TODAY,
-       DISCOVERY_CLOSE_COUNT_TODAY, DISCOVERY_COUNT_MISMATCH, DISCOVERY_BOOT_RESET,
+       DISCOVERY_FAIL_COUNT, DISCOVERY_TOTAL_FAIL_COUNT, DISCOVERY_BOOT_RESET,
        DISCOVERY_OTA_ACTIVE, DISCOVERY_LAST_FULL_CHARGE, DISCOVERY_SETUP_MODE,
-       DISCOVERY_FACTORY_RESET, DISCOVERY_BATTERY_CAL_OFFSET, DISCOVERY_DEBUG_MODE,
-       DISCOVERY_COUNT_RESET;
+       DISCOVERY_FACTORY_RESET, DISCOVERY_BATTERY_CAL_OFFSET, DISCOVERY_DEBUG_MODE;
 
 void buildTopics() {
   String base = String("home/") + settings.deviceId;
@@ -332,9 +320,6 @@ void buildTopics() {
   TOPIC_BOOT_COUNT  = base + "/boot_count";
   TOPIC_FAIL_COUNT  = base + "/connect_fail_count";
   TOPIC_TOTAL_FAIL_COUNT = base + "/total_fail_count";
-  TOPIC_OPEN_COUNT_TODAY  = base + "/open_count_today";
-  TOPIC_CLOSE_COUNT_TODAY = base + "/close_count_today";
-  TOPIC_COUNT_MISMATCH = base + "/count_mismatch";
   TOPIC_BOOT_RESET_CMD    = base + "/boot_count_reset/set";
   TOPIC_BOOT_RESET_STATE  = base + "/boot_count_reset/state";
   TOPIC_OTA_ACTIVE = base + "/ota_active";
@@ -347,8 +332,6 @@ void buildTopics() {
   TOPIC_BATTERY_CAL_OFFSET_SET = base + "/battery_cal_offset/set";
   TOPIC_DEBUG_MODE_CMD   = base + "/debug_mode/set";
   TOPIC_DEBUG_MODE_STATE = base + "/debug_mode/state";
-  TOPIC_COUNT_RESET_CMD   = base + "/count_reset/set";
-  TOPIC_COUNT_RESET_STATE = base + "/count_reset/state";
 
   String sbase = String("homeassistant/sensor/") + settings.deviceId;
   DISCOVERY_DOOR    = String("homeassistant/binary_sensor/") + settings.deviceId + "/door/config";
@@ -361,9 +344,6 @@ void buildTopics() {
   DISCOVERY_BOOT_COUNT  = sbase + "/boot_count/config";
   DISCOVERY_FAIL_COUNT  = sbase + "/connect_fail_count/config";
   DISCOVERY_TOTAL_FAIL_COUNT = sbase + "/total_fail_count/config";
-  DISCOVERY_OPEN_COUNT_TODAY  = sbase + "/open_count_today/config";
-  DISCOVERY_CLOSE_COUNT_TODAY = sbase + "/close_count_today/config";
-  DISCOVERY_COUNT_MISMATCH = sbase + "/count_mismatch/config";
   DISCOVERY_BOOT_RESET = String("homeassistant/switch/") + settings.deviceId + "/boot_count_reset/config";
   DISCOVERY_OTA_ACTIVE = String("homeassistant/binary_sensor/") + settings.deviceId + "/ota_active/config";
   DISCOVERY_LAST_FULL_CHARGE = sbase + "/last_full_charge/config";
@@ -371,7 +351,6 @@ void buildTopics() {
   DISCOVERY_FACTORY_RESET = String("homeassistant/switch/") + settings.deviceId + "/factory_reset/config";
   DISCOVERY_BATTERY_CAL_OFFSET = String("homeassistant/number/") + settings.deviceId + "/battery_cal_offset/config";
   DISCOVERY_DEBUG_MODE = String("homeassistant/switch/") + settings.deviceId + "/debug_mode/config";
-  DISCOVERY_COUNT_RESET = String("homeassistant/switch/") + settings.deviceId + "/count_reset/config";
 }
 
 // ---------------- Persisted state (survives deep sleep) ----------------
@@ -382,9 +361,6 @@ RTC_DATA_ATTR uint32_t connectFailCount = 0; // increments on any wake that fail
 RTC_DATA_ATTR uint32_t totalFailCount = 0;   // lifetime total failed wakes -- never resets, mirrors bootCount
 RTC_DATA_ATTR uint8_t cachedWifiChannel = 0; // 0 = unknown yet, let WiFi.begin() auto-select
 RTC_DATA_ATTR bool g_timeSynced = false;     // true once any cycle has completed a real NTP sync
-RTC_DATA_ATTR int32_t lastCounterDay = -1;   // -1 = unknown yet; YYYYMMDD of the day the counters below are for
-RTC_DATA_ATTR uint32_t openCountToday = 0;
-RTC_DATA_ATTR uint32_t closeCountToday = 0;
 
 // ---------------- Globals ----------------
 
@@ -399,7 +375,6 @@ volatile bool otaRequested = false;
 volatile bool bootCountResetRequested = false;
 volatile bool setupModeRequested = false;
 volatile bool factoryResetRequested = false;
-volatile bool countResetRequested = false;
 
 // Same persistent (not one-shot) pattern as temp_humidity_sensor_v4's LED
 // brightness/battery-offset entities: a plain calibration offset in volts,
@@ -472,8 +447,6 @@ void goToSleep();
 float batteryPercentage(float v);
 float calibrateBatteryVoltage(float raw);
 String wakeupCauseToString(esp_sleep_wakeup_cause_t cause);
-void updateDailyCounters(bool doorOpen, esp_sleep_wakeup_cause_t wakeupCause);
-String countMismatchState();
 void syncLocalTimeIfDue();
 void checkDoorPin();
 bool readStableDoorOpen();
@@ -544,11 +517,6 @@ void setup() {
                 bootCount, wakeupCauseToString(wakeupCause).c_str(), wakeupCause,
                 doorOpen ? "OPEN" : "CLOSED");
 
-  // Uses whatever the system clock already holds (it survives deep sleep
-  // once synced -- see syncLocalTimeIfDue()) rather than requiring a fresh
-  // network round trip on every wake just to check the date.
-  updateDailyCounters(doorOpen, wakeupCause);
-
   // analogReadMilliVolts() uses the ESP32's factory ADC calibration (eFuse)
   // for an accurate mV reading -- far more accurate than manually mapping
   // raw analogRead() counts against an assumed 3.3V reference, which the
@@ -597,19 +565,6 @@ void setup() {
         // every subsequent wake, and reflect the reset back to the HA UI.
         publishQos1(TOPIC_BOOT_RESET_CMD, "OFF", true);
         publishQos1(TOPIC_BOOT_RESET_STATE, "OFF", true);
-      }
-
-      if (countResetRequested) {
-        Serial.println("Daily open/close counters reset requested via MQTT switch.");
-        openCountToday = 0;
-        closeCountToday = 0;
-        publishQos1(TOPIC_OPEN_COUNT_TODAY, String(openCountToday), true);
-        publishQos1(TOPIC_CLOSE_COUNT_TODAY, String(closeCountToday), true);
-        publishQos1(TOPIC_COUNT_MISMATCH, countMismatchState(), true);
-        // Clear the retained command immediately, same as every other
-        // switch here -- see Reset Boot Counter above.
-        publishQos1(TOPIC_COUNT_RESET_CMD, "OFF", true);
-        publishQos1(TOPIC_COUNT_RESET_STATE, "OFF", true);
       }
 
       int failedTopics = publishState(currentDoorOpen, batteryVoltage, batteryPercent, rawVoltage, rssi, connectFailCount);
@@ -893,8 +848,6 @@ void onMqttMessage(const espMqttClientTypes::MessageProperties& properties, cons
     if (isOn) setupModeRequested = true;
   } else if (TOPIC_FACTORY_RESET_CMD.equals(topic)) {
     if (isOn) factoryResetRequested = true;
-  } else if (TOPIC_COUNT_RESET_CMD.equals(topic)) {
-    if (isOn) countResetRequested = true;
   } else if (TOPIC_BATTERY_CAL_OFFSET_SET.equals(topic)) {
     size_t copyLen = len < sizeof(g_battCalCmdPayload) - 1 ? len : sizeof(g_battCalCmdPayload) - 1;
     memcpy(g_battCalCmdPayload, payload, copyLen);
@@ -947,7 +900,6 @@ bool connectMQTT() {
       mqttClient.subscribe(TOPIC_FACTORY_RESET_CMD.c_str(), 1);
       mqttClient.subscribe(TOPIC_BATTERY_CAL_OFFSET_SET.c_str(), 1);
       mqttClient.subscribe(TOPIC_DEBUG_MODE_CMD.c_str(), 1);
-      mqttClient.subscribe(TOPIC_COUNT_RESET_CMD.c_str(), 1);
       unsigned long subStart = millis();
       while (millis() - subStart < OTA_SUBSCRIBE_WAIT_MS) {
         delay(20);
@@ -1157,51 +1109,6 @@ void sendDiscoveryConfig() {
     + "}";
   publishQos1(DISCOVERY_RSSI, rssiPayload, true);
 
-  // Daily open/close counters -- reset to 0 in firmware at local midnight
-  // (see updateDailyCounters()), so total_increasing here matches the same
-  // "periodically-resetting counter" convention energy_meter uses for its
-  // day/night tariff accumulators.
-  String openCountPayload = String("{")
-    + "\"name\":\"" + settings.deviceName + " Open Count Today\","
-    + "\"unique_id\":\"" + settings.deviceId + "_open_count_today\","
-    + "\"state_class\":\"total_increasing\","
-    + "\"icon\":\"mdi:door-open\","
-    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
-    + "\"state_topic\":\"" + TOPIC_OPEN_COUNT_TODAY + "\","
-    + "\"availability_topic\":\"" + TOPIC_AVAILABILITY + "\","
-    + "\"device\":{\"identifiers\":[\"" + settings.deviceId + "\"]}"
-    + "}";
-  publishQos1(DISCOVERY_OPEN_COUNT_TODAY, openCountPayload, true);
-
-  String closeCountPayload = String("{")
-    + "\"name\":\"" + settings.deviceName + " Close Count Today\","
-    + "\"unique_id\":\"" + settings.deviceId + "_close_count_today\","
-    + "\"state_class\":\"total_increasing\","
-    + "\"icon\":\"mdi:door-closed\","
-    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
-    + "\"state_topic\":\"" + TOPIC_CLOSE_COUNT_TODAY + "\","
-    + "\"availability_topic\":\"" + TOPIC_AVAILABILITY + "\","
-    + "\"device\":{\"identifiers\":[\"" + settings.deviceId + "\"]}"
-    + "}";
-  publishQos1(DISCOVERY_CLOSE_COUNT_TODAY, closeCountPayload, true);
-
-  // Count-mismatch diagnostic. States: "ok", "fail_open" (opens are being
-  // missed), "fail_close" (closes are being missed) -- see
-  // countMismatchState()'s own comment for the reasoning. Not a
-  // binary_sensor: there are two distinct failure directions to
-  // distinguish, not just a single problem/no-problem flag.
-  String countMismatchPayload = String("{")
-    + "\"name\":\"" + settings.deviceName + " Count Mismatch\","
-    + "\"unique_id\":\"" + settings.deviceId + "_count_mismatch\","
-    + "\"entity_category\":\"diagnostic\","
-    + "\"icon\":\"mdi:alert-circle-outline\","
-    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
-    + "\"state_topic\":\"" + TOPIC_COUNT_MISMATCH + "\","
-    + "\"availability_topic\":\"" + TOPIC_AVAILABILITY + "\","
-    + "\"device\":{\"identifiers\":[\"" + settings.deviceId + "\"]}"
-    + "}";
-  publishQos1(DISCOVERY_COUNT_MISMATCH, countMismatchPayload, true);
-
   // Boot count sensor discovery payload (diagnostic -- total wakes since last full reset)
   String bootCountPayload = String("{")
     + "\"name\":\"" + settings.deviceName + " Boot Count\","
@@ -1284,27 +1191,6 @@ void sendDiscoveryConfig() {
     + "\"device\":{\"identifiers\":[\"" + settings.deviceId + "\"]}"
     + "}";
   publishQos1(DISCOVERY_BOOT_RESET, bootResetPayload, true);
-
-  // Reset-daily-counters control. Same momentary-via-echo retained-switch
-  // trick as Reset Boot Counter above -- zeroes open_count_today and
-  // close_count_today (and clears any count_mismatch fault along with
-  // them, since a mismatch is only ever a function of those two numbers)
-  // for a manual correction after, e.g., testing/debugging the sensor by
-  // hand and not wanting today's numbers to reflect that.
-  String countResetPayload = String("{")
-    + "\"name\":\"" + settings.deviceName + " Reset Daily Counters\","
-    + "\"unique_id\":\"" + settings.deviceId + "_count_reset\","
-    + "\"command_topic\":\"" + TOPIC_COUNT_RESET_CMD + "\","
-    + "\"state_topic\":\"" + TOPIC_COUNT_RESET_STATE + "\","
-    + "\"payload_on\":\"ON\","
-    + "\"payload_off\":\"OFF\","
-    + "\"retain\":true,"
-    + "\"icon\":\"mdi:counter\","
-    + "\"entity_category\":\"config\","
-    + "\"availability_topic\":\"" + TOPIC_AVAILABILITY + "\","
-    + "\"device\":{\"identifiers\":[\"" + settings.deviceId + "\"]}"
-    + "}";
-  publishQos1(DISCOVERY_COUNT_RESET, countResetPayload, true);
 
   // OTA-active indicator. This device has no status LED (unlike the other
   // battery sensors in this fleet) to show OTA is in progress, so this is
@@ -1406,19 +1292,15 @@ int publishState(bool doorOpen, float batteryVoltage, float batteryPercent, floa
   if (!publishQos1(TOPIC_BOOT_COUNT, String(bootCount), true)) failed++;
   if (!publishQos1(TOPIC_FAIL_COUNT, String(failCount), true)) failed++;
   if (!publishQos1(TOPIC_TOTAL_FAIL_COUNT, String(totalFailCount), true)) failed++;
-  if (!publishQos1(TOPIC_OPEN_COUNT_TODAY, String(openCountToday), true)) failed++;
-  if (!publishQos1(TOPIC_CLOSE_COUNT_TODAY, String(closeCountToday), true)) failed++;
-  if (!publishQos1(TOPIC_COUNT_MISMATCH, countMismatchState(), true)) failed++;
 
   // Always OFF here -- this runs before the OTA check below. Also acts as a
   // safety net: if the device somehow died mid-OTA on a previous wake, the
   // next normal wake clears a stale retained "ON" automatically.
   if (!publishQos1(TOPIC_OTA_ACTIVE, "OFF", true)) failed++;
 
-  Serial.printf("Published: door=%s, battery=%sV (%s%%, low=%s), rssi=%sdBm, boot=%lu, failCount=%lu, opens_today=%lu, closes_today=%lu (failed topics this cycle: %d)\n",
+  Serial.printf("Published: door=%s, battery=%sV (%s%%, low=%s), rssi=%sdBm, boot=%lu, failCount=%lu (failed topics this cycle: %d)\n",
                 doorOpen ? "OPEN" : "CLOSED", battStr, battPctStr, batteryLow ? "yes" : "no",
-                rssiStr, (unsigned long)bootCount, (unsigned long)failCount,
-                (unsigned long)openCountToday, (unsigned long)closeCountToday, failed);
+                rssiStr, (unsigned long)bootCount, (unsigned long)failCount, failed);
 
   return failed;
 }
@@ -1437,7 +1319,7 @@ int publishState(bool doorOpen, float batteryVoltage, float batteryPercent, floa
 // If the clock hasn't synced yet (g_timeSynced false) when a rising edge
 // happens, wasAt100 still gets set so this doesn't re-trigger every wake,
 // but no date gets recorded -- a one-time, cosmetic gap on a device's
-// very first-ever boot, same class of edge case as updateDailyCounters().
+// very first-ever boot.
 String updateAndGetLastFullChargeDate(float batteryPercent) {
   batteryPrefs.begin("battery", false);
   bool wasAt100 = batteryPrefs.getBool("wasAt100", false);
@@ -1832,63 +1714,12 @@ String wakeupCauseToString(esp_sleep_wakeup_cause_t cause) {
   }
 }
 
-// ---------------- Time / daily counters ----------------
-
-// Resets openCountToday/closeCountToday to 0 the first time this runs on a
-// new local calendar day, then (only on an actual door-transition wake, not
-// the periodic heartbeat) tallies this wake's event. Reads whatever the
-// system clock already holds -- no network call here, see syncLocalTimeIfDue()
-// below for why. Until the very first NTP sync ever completes (g_timeSynced
-// still false, i.e. this device's first-ever boot), the day is unknown, so
-// this cycle's event simply isn't tallied -- a one-time, cosmetic gap.
-void updateDailyCounters(bool doorOpen, esp_sleep_wakeup_cause_t wakeupCause) {
-  if (!g_timeSynced) {
-    Serial.println("[counters] clock not yet synced -- skipping daily open/close tally this cycle.");
-    return;
-  }
-
-  time_t now = time(nullptr);
-  struct tm t;
-  localtime_r(&now, &t);
-  int32_t today = (t.tm_year + 1900) * 10000L + (t.tm_mon + 1) * 100L + t.tm_mday;
-
-  if (today != lastCounterDay) {
-    Serial.printf("[counters] new local day (%ld -> %ld), resetting open/close counters.\n",
-                  (long)lastCounterDay, (long)today);
-    openCountToday = 0;
-    closeCountToday = 0;
-    lastCounterDay = today;
-  }
-
-  if (wakeupCause == ESP_SLEEP_WAKEUP_GPIO) {
-    if (doorOpen) openCountToday++; else closeCountToday++;
-  }
-}
-
-// A door can only open and close one at a time, so over any stretch since
-// the daily counters last reset, open_count_today and close_count_today
-// can only ever be equal or differ by exactly 1 -- whichever count started
-// the stretch "ahead" depends on whatever state the door was already in
-// at the moment of the reset, but the *gap* between the two never exceeds
-// 1 for a physically real door. A gap of 2 or more means a real transition
-// was never counted somewhere along the way (a missed wake, a debounce
-// that gave up and fell back to the wrong reading, etc.) -- and whichever
-// count is the lower one identifies which direction is failing to
-// register, since it's the one missing an event the other side already
-// saw happen.
-String countMismatchState() {
-  int32_t diff = (int32_t)openCountToday - (int32_t)closeCountToday;
-  if (diff >= 2)  return "fail_close"; // opens outpacing closes -> closes are being missed
-  if (diff <= -2) return "fail_open";  // closes outpacing opens -> opens are being missed
-  return "ok";
-}
-
 // ---------------- Door pin polling ----------------
 
 // Re-reads the reed switch and, if it's genuinely changed since the last
-// known state (currentDoorOpen), debounces it, updates currentDoorOpen, and
-// tallies it into today's open/close counters. Called from inside the
-// WiFi-connect, MQTT-connect, per-publish PUBACK-wait, and OTA-window loops
+// known state (currentDoorOpen), debounces it and updates currentDoorOpen.
+// Called from inside the WiFi-connect, MQTT-connect, per-publish
+// PUBACK-wait, and OTA-window loops
 // (all of which already poll in a delay() loop), so a rapid open-then-close
 // that happens while the device is busy on the network -- not just the
 // transition that caused this wake -- gets caught, at no extra awake-time
@@ -1915,7 +1746,6 @@ void checkDoorPin() {
   if (open == currentDoorOpen) return; // settled back to where it started -- was noise
 
   currentDoorOpen = open;
-  if (open) openCountToday++; else closeCountToday++;
   Serial.printf("[door] mid-cycle transition detected: now %s\n", open ? "OPEN" : "CLOSED");
 }
 
@@ -1948,12 +1778,13 @@ bool readStableDoorOpen() {
   return candidate;
 }
 
-// Syncs the system clock to local time (needed only so updateDailyCounters()
-// can tell when local midnight has passed). The system clock survives deep
-// sleep once synced, so this only needs to run occasionally to correct
-// drift, not on every wake -- called after MQTT is up, and deliberately
-// last in the connected branch so a slow/failed NTP round trip can only
-// cost date accuracy, never delay or risk the door-state/battery publish.
+// Syncs the system clock to local time (needed only so
+// updateAndGetLastFullChargeDate() can record a real calendar date). The
+// system clock survives deep sleep once synced, so this only needs to run
+// occasionally to correct drift, not on every wake -- called after MQTT is
+// up, and deliberately last in the connected branch so a slow/failed NTP
+// round trip can only cost date accuracy, never delay or risk the
+// door-state/battery publish.
 void syncLocalTimeIfDue() {
   bool dueForResync = !g_timeSynced || (bootCount % NTP_RESYNC_EVERY_N_BOOTS == 0);
   if (!dueForResync) return;
@@ -2013,13 +1844,9 @@ void runDebugSession() {
     }
 
     bool before = currentDoorOpen;
-    uint32_t openBefore = openCountToday, closeBefore = closeCountToday;
     checkDoorPin(); // same debounce/logging as the normal cycle -- this is the actual thing being watched
     if (currentDoorOpen != before) {
       publishQos1(TOPIC_STATE, currentDoorOpen ? "OPEN" : "CLOSED", true);
-      if (openCountToday != openBefore) publishQos1(TOPIC_OPEN_COUNT_TODAY, String(openCountToday), true);
-      if (closeCountToday != closeBefore) publishQos1(TOPIC_CLOSE_COUNT_TODAY, String(closeCountToday), true);
-      publishQos1(TOPIC_COUNT_MISMATCH, countMismatchState(), true);
     }
 
     // Re-check for a live toggle-off mid-session -- onMqttMessage() fires
