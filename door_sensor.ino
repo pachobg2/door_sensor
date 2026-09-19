@@ -712,16 +712,32 @@ void setup() {
   }
 
   // Clean (non-forced) disconnect: the library sends any remaining queued
-  // messages before closing the connection. A fixed delay, not a poll on
-  // connected() -- that flag almost certainly flips false synchronously
-  // the instant disconnect() is called, before the actual DISCONNECT
-  // packet goes out on the library's background task, which would make a
-  // connected()-based wait exit immediately every time instead of only
-  // occasionally being too short (confirmed: v1.3.5 made this worse, not
-  // better, replacing a "sometimes" broker-side Last Will misfire with an
-  // "every time" one). Give it real, unconditional wall-clock time instead.
+  // messages before closing the connection. A fixed total delay, not a
+  // poll on connected() -- that flag almost certainly flips false
+  // synchronously the instant disconnect() is called, before the actual
+  // DISCONNECT packet goes out on the library's background task, which
+  // would make a connected()-based wait exit immediately every time
+  // instead of only occasionally being too short (confirmed: v1.3.5 made
+  // this worse, not better, replacing a "sometimes" broker-side Last Will
+  // misfire with an "every time" one). Give it real, unconditional
+  // wall-clock time instead -- but spent in the same
+  // delay-a-little-then-checkDoorPin() loop every other wait in this file
+  // already uses, not a single blind delay() like this used to be. This
+  // was the one remaining unwatched window: a transition landing here
+  // previously went uncounted entirely (checkDoorPin() never got called
+  // again to notice it) and could arm armWakeup() below with stale state,
+  // which is consistent with real closes only ever going missing around
+  // sleep, never while the device stays continuously awake (Debug Mode).
+  // MQTT is already on its way down by this point, so a transition caught
+  // here doesn't get its own publish -- but it does update currentDoorOpen
+  // and today's open/close counters correctly, and the next wake (now
+  // armed for the right level) publishes the fresh state itself.
   mqttClient.disconnect();
-  delay(MQTT_DISCONNECT_DELAY_MS);
+  unsigned long disconnectStart = millis();
+  while (millis() - disconnectStart < MQTT_DISCONNECT_DELAY_MS) {
+    delay(20);
+    checkDoorPin();
+  }
   WiFi.disconnect(true);
 
   stopAwakeWatchdog(); // about to sleep on our own terms, no need for the failsafe to fire mid-sleep
