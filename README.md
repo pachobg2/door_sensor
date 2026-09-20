@@ -54,7 +54,10 @@ button), and a last-full-charge date to track battery life — see
 - Records the date of the last time the battery read 100% in flash/NVS
   (not RTC memory, so it survives an actual battery depletion, not just
   deep sleep) — compare this to whenever the device eventually goes quiet
-  to see how long a charge actually lasted.
+  to see how long a charge actually lasted. Only re-arms once the battery
+  has actually dropped to `FULL_CHARGE_REARM_THRESHOLD_PCT` (default 97%,
+  `config.h`) or below, so a reading hovering near the top of the curve
+  bouncing back up to 100% doesn't record a "new" full charge every time.
 - HA discovery configs carry an `expire_after` so a dead device eventually
   shows "unavailable" instead of a door state frozen forever at its last
   value.
@@ -254,3 +257,4 @@ credentials are no longer read at all.
 | v2.1.2 | 2026-09-19 | Added a `DOOR_LINGER_MS` (default 3s) window at the end of every cycle, still connected, before starting the MQTT/WiFi teardown -- an extra margin on top of v2.1.1's fix, added "just in case" after testing came back clean. A follow-up transition landing in this window now gets its own live publish (not just a counted-but-unreported one, like the disconnect-delay window still handles), at the cost of a few extra seconds awake occasionally. |
 | v2.2.0 | 2026-09-19 | Added a "Reset Daily Counters" retained MQTT switch (same momentary-via-echo pattern as Reset Boot Counter) to manually zero `open_count_today`/`close_count_today` -- also clears any `count_mismatch` fault along with them, since a mismatch is only ever a function of those two numbers. |
 | **v2.3.0** | 2026-09-19 | **Removed `open_count_today`/`close_count_today`/`count_mismatch` and the "Reset Daily Counters" switch entirely.** Diagnostics-only feature, not the core function (door state) -- decided during unrelated troubleshooting on the `DS_1_v3` light-sleep fork not to keep carrying this weight when door state is what actually matters. Removed: the two RTC_DATA_ATTR counters and `lastCounterDay`, `countResetRequested`, `updateDailyCounters()`, `countMismatchState()`, all their MQTT topics/HA discovery entries/subscriptions, and the tallying in `checkDoorPin()` and `runDebugSession()`. `config.h`'s NTP section comment updated to reflect its one remaining purpose (the last-full-charge date). |
+| v2.3.1 | 2026-09-20 | Fixed the last-full-charge diagnostic re-triggering spuriously: a battery reading hovering right at the top of its curve (ADC noise, a charger's trickle-float ripple) could bounce 99%→100%→99%→100% and record a "new" full charge on every single upward bounce, even though the battery was never really any lower than 99%. Replaced the plain `wasAt100` rising-edge flag in `updateAndGetLastFullChargeDate()` with an "armed" flag that only re-arms once the battery actually reads at or below the new `FULL_CHARGE_REARM_THRESHOLD_PCT` (default 97%, `config.h`) -- a reading of 100% only counts as "just charged" if it came from at or below that. Applied fleet-wide to every project sharing this diagnostic (`DS_1_v3`, `TH_2_v4`, `TH_2_v4_L`, `temp_humidity_sensor`, `temp_humidity_sensor_zdravkovec`). |

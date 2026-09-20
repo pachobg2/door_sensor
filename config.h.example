@@ -68,6 +68,12 @@ const CalPoint BATT_CAL[] = {
 };
 const int BATT_CAL_POINTS = sizeof(BATT_CAL) / sizeof(BATT_CAL[0]);
 const float BATTERY_LOW_THRESHOLD_PCT = 15.0f;
+// The last-full-charge diagnostic (see updateAndGetLastFullChargeDate() in
+// the .ino) only re-arms once the battery reads at or below this -- avoids
+// recording a "new" full charge every time a reading hovering near the top
+// of the curve bounces back up to 100%, when it was never really any lower
+// than this.
+const float FULL_CHARGE_REARM_THRESHOLD_PCT = 97.0f;
 
 // ------------------------------------------------------------------
 // Timing

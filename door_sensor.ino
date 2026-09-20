@@ -1307,25 +1307,36 @@ int publishState(bool doorOpen, float batteryVoltage, float batteryPercent, floa
 
 // ---------------- Battery ----------------
 
-// Detects a rising edge into 100% battery (i.e. "just charged", not "still
-// sitting at 100% from before") and records today's date as the new last-
-// full-charge date. Persisted in flash/NVS rather than RTC memory
-// specifically so it survives an actual battery depletion -- comparing
-// this date to whenever the device later goes quiet is how you tell how
-// long a charge actually lasted. Returns whatever date is currently
-// stored (possibly still empty, if the battery has never yet read 100%
-// since this was added).
+// Detects a *real* rising edge into 100% battery (i.e. "just charged from a
+// meaningfully lower level", not "still sitting at 100%" and not "briefly
+// dipped to 99% and bounced straight back up") and records today's date as
+// the new last-full-charge date. Persisted in flash/NVS rather than RTC
+// memory specifically so it survives an actual battery depletion --
+// comparing this date to whenever the device later goes quiet is how you
+// tell how long a charge actually lasted. Returns whatever date is
+// currently stored (possibly still empty, if the battery has never yet
+// read 100% since this was added).
 //
-// If the clock hasn't synced yet (g_timeSynced false) when a rising edge
-// happens, wasAt100 still gets set so this doesn't re-trigger every wake,
-// but no date gets recorded -- a one-time, cosmetic gap on a device's
-// very first-ever boot.
+// Uses an "armed" flag rather than a plain wasAt100 edge-detect: a reading
+// of 100% only counts as "just charged" if the battery has actually been
+// at or below FULL_CHARGE_REARM_THRESHOLD_PCT at some point since the last
+// time this recorded a date. Without this, a battery hovering right at the
+// top of its curve (ADC noise, a charger's own trickle-float ripple) can
+// read 99% then 100% then 99% then 100% indefinitely, and a plain
+// wasAt100 edge-detect would record a "new" full charge on every single
+// one of those upward bounces even though the battery was never really
+// any lower than 99%.
+//
+// If the clock hasn't synced yet (g_timeSynced false) when an armed 100%
+// reading happens, the flag still gets disarmed so this doesn't re-trigger
+// every wake, but no date gets recorded -- a one-time, cosmetic gap on a
+// device's very first-ever boot.
 String updateAndGetLastFullChargeDate(float batteryPercent) {
   batteryPrefs.begin("battery", false);
-  bool wasAt100 = batteryPrefs.getBool("wasAt100", false);
+  bool armed = batteryPrefs.getBool("fullChargeArmed", true); // true by default -- a fresh device's first 100% reading still counts
   bool isAt100 = batteryPercent >= 100.0f;
 
-  if (isAt100 && !wasAt100 && g_timeSynced) {
+  if (isAt100 && armed && g_timeSynced) {
     time_t now = time(nullptr);
     struct tm t;
     localtime_r(&now, &t);
@@ -1334,8 +1345,15 @@ String updateAndGetLastFullChargeDate(float batteryPercent) {
     batteryPrefs.putString("lastFullDate", buf);
     Serial.printf("[battery] reached 100%% -- recorded last full charge date: %s\n", buf);
   }
-  if (isAt100 != wasAt100) {
-    batteryPrefs.putBool("wasAt100", isAt100);
+
+  bool shouldBeArmed = armed;
+  if (isAt100 && armed) {
+    shouldBeArmed = false; // consumed -- won't trigger again until it dips back down
+  } else if (batteryPercent <= FULL_CHARGE_REARM_THRESHOLD_PCT) {
+    shouldBeArmed = true;
+  }
+  if (shouldBeArmed != armed) {
+    batteryPrefs.putBool("fullChargeArmed", shouldBeArmed);
   }
 
   String result = batteryPrefs.getString("lastFullDate", "");
