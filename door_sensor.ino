@@ -95,6 +95,7 @@
 #include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_private/esp_clk.h" // esp_clk_rtc_time(), for uptime across deep sleep
 #include <time.h>
 #include <sys/time.h>
 #include <vector>
@@ -299,12 +300,13 @@ String TOPIC_STATE, TOPIC_BATTERY, TOPIC_BATTERY_PCT, TOPIC_BATTERY_V_RAW, TOPIC
        TOPIC_LAST_FULL_CHARGE, TOPIC_SETUP_MODE_CMD, TOPIC_SETUP_MODE_STATE,
        TOPIC_FACTORY_RESET_CMD, TOPIC_FACTORY_RESET_STATE,
        TOPIC_BATTERY_CAL_OFFSET, TOPIC_BATTERY_CAL_OFFSET_SET,
-       TOPIC_DEBUG_MODE_CMD, TOPIC_DEBUG_MODE_STATE;
+       TOPIC_DEBUG_MODE_CMD, TOPIC_DEBUG_MODE_STATE, TOPIC_UPTIME;
 String DISCOVERY_DOOR, DISCOVERY_BATTERY, DISCOVERY_BATTERY_PCT, DISCOVERY_BATTERY_V_RAW,
        DISCOVERY_RSSI, DISCOVERY_OTA, DISCOVERY_BATTERY_LOW, DISCOVERY_BOOT_COUNT,
        DISCOVERY_FAIL_COUNT, DISCOVERY_TOTAL_FAIL_COUNT, DISCOVERY_BOOT_RESET,
        DISCOVERY_OTA_ACTIVE, DISCOVERY_LAST_FULL_CHARGE, DISCOVERY_SETUP_MODE,
-       DISCOVERY_FACTORY_RESET, DISCOVERY_BATTERY_CAL_OFFSET, DISCOVERY_DEBUG_MODE;
+       DISCOVERY_FACTORY_RESET, DISCOVERY_BATTERY_CAL_OFFSET, DISCOVERY_DEBUG_MODE,
+       DISCOVERY_UPTIME;
 
 void buildTopics() {
   String base = String("home/") + settings.deviceId;
@@ -332,6 +334,7 @@ void buildTopics() {
   TOPIC_BATTERY_CAL_OFFSET_SET = base + "/battery_cal_offset/set";
   TOPIC_DEBUG_MODE_CMD   = base + "/debug_mode/set";
   TOPIC_DEBUG_MODE_STATE = base + "/debug_mode/state";
+  TOPIC_UPTIME = base + "/uptime";
 
   String sbase = String("homeassistant/sensor/") + settings.deviceId;
   DISCOVERY_DOOR    = String("homeassistant/binary_sensor/") + settings.deviceId + "/door/config";
@@ -351,6 +354,7 @@ void buildTopics() {
   DISCOVERY_FACTORY_RESET = String("homeassistant/switch/") + settings.deviceId + "/factory_reset/config";
   DISCOVERY_BATTERY_CAL_OFFSET = String("homeassistant/number/") + settings.deviceId + "/battery_cal_offset/config";
   DISCOVERY_DEBUG_MODE = String("homeassistant/switch/") + settings.deviceId + "/debug_mode/config";
+  DISCOVERY_UPTIME = sbase + "/uptime/config";
 }
 
 // ---------------- Persisted state (survives deep sleep) ----------------
@@ -361,6 +365,30 @@ RTC_DATA_ATTR uint32_t connectFailCount = 0; // increments on any wake that fail
 RTC_DATA_ATTR uint32_t totalFailCount = 0;   // lifetime total failed wakes -- never resets, mirrors bootCount
 RTC_DATA_ATTR uint8_t cachedWifiChannel = 0; // 0 = unknown yet, let WiFi.begin() auto-select
 RTC_DATA_ATTR bool g_timeSynced = false;     // true once any cycle has completed a real NTP sync
+
+// ---------------- Uptime ----------------
+// Time since the last real reset or power loss -- NOT since the last wake.
+// A deep-sleep timer/GPIO wake is a continuation of the same "up" period
+// (the device never actually lost power or restarted), so it counts; any
+// other reset reason (power-on, manual reset, brownout, watchdog, software
+// restart, a battery that died and was replaced...) zeroes it. Uses the RTC
+// counter, which keeps counting through deep sleep; millis()/esp_timer
+// don't. See initUptime(), called first thing in setup().
+RTC_DATA_ATTR uint64_t g_uptimeStartUs = 0;
+
+void initUptime() {
+  if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
+    g_uptimeStartUs = esp_clk_rtc_time();
+    // Any real reset (including the restart at the end of an OTA/USB flash,
+    // which leaves RTC memory intact) re-announces discovery once, so a
+    // newly added entity actually shows up in HA without a power cycle.
+    discoverySent = false;
+  }
+}
+
+uint32_t uptimeSeconds() {
+  return (uint32_t)((esp_clk_rtc_time() - g_uptimeStartUs) / 1000000ULL);
+}
 
 // ---------------- Globals ----------------
 
@@ -475,6 +503,7 @@ void setup() {
     delay(100);
   }
 
+  initUptime();
   bootCount++;
 
   loadSettings();
@@ -1151,6 +1180,22 @@ void sendDiscoveryConfig() {
     + "}";
   publishQos1(DISCOVERY_TOTAL_FAIL_COUNT, totalFailCountPayload, true);
 
+  // Uptime -- seconds since the last real reset/power loss (deep-sleep
+  // wakes don't count as a reset, see initUptime())
+  String uptimePayload = String("{")
+    + "\"name\":\"" + settings.deviceName + " Uptime\","
+    + "\"unique_id\":\"" + settings.deviceId + "_uptime\","
+    + "\"unit_of_measurement\":\"s\","
+    + "\"device_class\":\"duration\","
+    + "\"state_class\":\"measurement\","
+    + "\"entity_category\":\"diagnostic\","
+    + "\"expire_after\":" + String(EXPIRE_AFTER_SEC) + ","
+    + "\"state_topic\":\"" + TOPIC_UPTIME + "\","
+    + "\"availability_topic\":\"" + TOPIC_AVAILABILITY + "\","
+    + "\"device\":{\"identifiers\":[\"" + settings.deviceId + "\"]}"
+    + "}";
+  publishQos1(DISCOVERY_UPTIME, uptimePayload, true);
+
   // OTA trigger switch discovery payload. "retain: true" makes HA publish
   // the ON command with the retain flag set, so it survives on the broker
   // until this (sleeping) device actually wakes up and subscribes to see it.
@@ -1292,6 +1337,7 @@ int publishState(bool doorOpen, float batteryVoltage, float batteryPercent, floa
   if (!publishQos1(TOPIC_BOOT_COUNT, String(bootCount), true)) failed++;
   if (!publishQos1(TOPIC_FAIL_COUNT, String(failCount), true)) failed++;
   if (!publishQos1(TOPIC_TOTAL_FAIL_COUNT, String(totalFailCount), true)) failed++;
+  if (!publishQos1(TOPIC_UPTIME, String(uptimeSeconds()), true)) failed++;
 
   // Always OFF here -- this runs before the OTA check below. Also acts as a
   // safety net: if the device somehow died mid-OTA on a previous wake, the
